@@ -251,7 +251,6 @@ def render_ticket_card(ticket):
     st.caption(f"Created by: {ticket['created_by']}")
     if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
         st.session_state.selected_ticket = ticket['ticket_id']
-        st.rerun()
 
 def show_ticket_modal():
     """Show ticket details modal"""
@@ -408,12 +407,17 @@ with col2:
 with col3:
     render_column("col_resolved", "✅ Resolved", resolved_tickets)
 
-event = dnd("col_open", "col_in_progress", "col_resolved", handle="border", key="kanban_dnd")
+event = dnd("col_open", "col_in_progress", "col_resolved",
+            handle=True, handle_icon=":material/drag_indicator:", key="kanban_dnd")
 if event and event.item_key and event.item_key.startswith("ticket_"):
-    ticket_id = int(event.item_key.split("_", 1)[1])
-    target_status = COLUMN_STATUS.get(event.to_container)
-    if target_status and update_ticket_status(ticket_id, target_status):
-        st.rerun()
+    drop_sig = (event.from_container, event.to_container, event.item_key, event.from_index, event.to_index)
+    if st.session_state.get("last_drop") != drop_sig:
+        st.session_state.last_drop = drop_sig
+        st.session_state.selected_ticket = None
+        ticket_id = int(event.item_key.split("_", 1)[1])
+        target_status = COLUMN_STATUS.get(event.to_container)
+        if target_status and update_ticket_status(ticket_id, target_status):
+            st.rerun()
 
 # Show modal if a ticket is selected
 show_ticket_modal()
