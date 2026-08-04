@@ -28,22 +28,46 @@ def get_db_connection():
             if st.session_state.conn:
                 st.session_state.conn.close()
             
-            # Generate new token
-            endpoint_name = "projects/ticketingsystem/branches/production/endpoints/primary"
-            token = w.postgres.generate_database_credential(endpoint=endpoint_name).token
+            # Get connection details from Lakebase resource environment variables
+            # Resource name: lakebase-ticketingsystem creates env vars: LAKEBASE_TICKETINGSYSTEM_*
+            host = os.environ.get('LAKEBASE_TICKETINGSYSTEM_HOST') or os.environ.get('PGHOST')
+            database = os.environ.get('LAKEBASE_TICKETINGSYSTEM_DATABASE') or os.environ.get('PGDATABASE', 'databricks_postgres')
+            user = os.environ.get('LAKEBASE_TICKETINGSYSTEM_USER') or os.environ.get('PGUSER')
+            port = int(os.environ.get('LAKEBASE_TICKETINGSYSTEM_PORT') or os.environ.get('PGPORT', '5432'))
+            password = os.environ.get('LAKEBASE_TICKETINGSYSTEM_PASSWORD') or os.environ.get('PGPASSWORD')
+            
+            # If we don't have a password from env, try to generate OAuth token
+            if not password:
+                try:
+                    endpoint_name = os.environ.get('LAKEBASE_ENDPOINT', 'projects/ticketingsystem/branches/production/endpoints/primary')
+                    if hasattr(w, 'postgres'):
+                        token = w.postgres.generate_database_credential(endpoint=endpoint_name).token
+                        password = token
+                    else:
+                        # Fallback: use workspace token
+                        password = w.config.token
+                except Exception as token_error:
+                    st.error(f"Failed to generate auth token: {token_error}")
+                    return None
+            
+            if not host:
+                st.error("Database host not configured. Please check app.yaml Lakebase resource configuration.")
+                return None
             
             # Create new connection
             st.session_state.conn = psycopg.connect(
-                host=os.environ.get('PGHOST'),
-                dbname=os.environ.get('PGDATABASE', 'databricks_postgres'),
-                user=os.environ.get('PGUSER'),
-                port=os.environ.get('PGPORT', 5432),
-                password=token,
+                host=host,
+                dbname=database,
+                user=user,
+                port=port,
+                password=password,
                 sslmode="require"
             )
             st.session_state.last_token_refresh = current_time
         except Exception as e:
             st.error(f"Database connection failed: {e}")
+            st.error(f"Debug - Host: {os.environ.get('LAKEBASE_TICKETINGSYSTEM_HOST', 'NOT SET')}")
+            st.error(f"Debug - User: {os.environ.get('LAKEBASE_TICKETINGSYSTEM_USER', 'NOT SET')}")
             return None
     
     return st.session_state.conn

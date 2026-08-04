@@ -4,6 +4,15 @@ command:
   - app.py
   - --server.port
   - "$DATABRICKS_APP_PORT"
+
+env:
+  - name: LAKEBASE_PROJECT
+    value: "ticketingsystem"
+  - name: LAKEBASE_BRANCH
+    value: "production"
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/ticketingsystem/branches/production/endpoints/primary"
+
 resources:
   - name: lakebase-ticketingsystem
     lakebase:
