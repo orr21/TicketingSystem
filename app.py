@@ -18,82 +18,107 @@ if 'conn' not in st.session_state or 'last_token_refresh' not in st.session_stat
     st.session_state.conn = None
 
 def get_oauth_token():
-    """Get OAuth token using client credentials"""
-    import requests
-    
-    client_id = os.environ.get('DATABRICKS_CLIENT_ID')
-    client_secret = os.environ.get('DATABRICKS_CLIENT_SECRET')
-    databricks_host = os.environ.get('DATABRICKS_HOST')
-    
-    if not all([client_id, client_secret, databricks_host]):
-        raise ValueError("Missing OAuth credentials in environment")
-    
-    # OAuth token endpoint
-    token_url = f"https://{databricks_host}/oidc/v1/token"
-    
-    # Request access token
-    response = requests.post(
-        token_url,
-        data={
-            'grant_type': 'client_credentials',
-            'scope': 'all-apis'
-        },
-        auth=(client_id, client_secret)
-    )
-    
-    if response.status_code != 200:
-        raise ValueError(f"Failed to get OAuth token: {response.text}")
-    
-    return response.json()['access_token']
+    """Get a fresh Lakebase OAuth token for the bound database endpoint"""
+    endpoint = os.environ.get('LAKEBASE_ENDPOINT') or os.environ.get('ENDPOINT_NAME')
+    if not endpoint:
+        raise ValueError("LAKEBASE_ENDPOINT not found in environment")
+
+    credential = w.postgres.generate_database_credential(endpoint=endpoint)
+    return credential.token
+
+def ensure_schema(conn):
+    """Create the tickets/ticket_messages tables and seed sample data if empty"""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tickets (
+                ticket_id SERIAL PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_messages (
+                message_id SERIAL PRIMARY KEY,
+                ticket_id INTEGER NOT NULL REFERENCES tickets(ticket_id) ON DELETE CASCADE,
+                message_text TEXT NOT NULL,
+                author TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("SELECT COUNT(*) FROM tickets")
+        if cur.fetchone()[0] == 0:
+            sample_tickets = [
+                ('Cannot log in to VPN', 'open', 'alice@example.com'),
+                ('Billing discrepancy on invoice #2041', 'in_progress', 'bob@example.com'),
+                ('Databricks app deploy failing', 'resolved', 'carol@example.com'),
+            ]
+            ticket_ids = []
+            for title, status, created_by in sample_tickets:
+                cur.execute(
+                    "INSERT INTO tickets (title, status, created_by) VALUES (%s, %s, %s) RETURNING ticket_id",
+                    (title, status, created_by),
+                )
+                ticket_ids.append(cur.fetchone()[0])
+            sample_messages = [
+                (ticket_ids[0], 'Getting a timeout when connecting to VPN.', 'alice@example.com'),
+                (ticket_ids[0], 'We are investigating, please share your client logs.', 'support@example.com'),
+                (ticket_ids[1], 'Invoice shows an extra charge for last month.', 'bob@example.com'),
+                (ticket_ids[1], 'Confirmed the overcharge, a refund is being processed.', 'support@example.com'),
+                (ticket_ids[2], 'Deploy fails with a missing module error.', 'carol@example.com'),
+                (ticket_ids[2], 'Fixed by pinning the dependency version.', 'support@example.com'),
+            ]
+            for ticket_id, message_text, author in sample_messages:
+                cur.execute(
+                    "INSERT INTO ticket_messages (ticket_id, message_text, author) VALUES (%s, %s, %s)",
+                    (ticket_id, message_text, author),
+                )
+            conn.commit()
 
 def get_db_connection():
     """Get database connection with automatic token refresh"""
     current_time = time.time()
-    
-    # Refresh token every 15 minutes (900 seconds)
+
+    # Refresh connection/token every 15 minutes (900 seconds)
     if st.session_state.conn is None or (current_time - st.session_state.last_token_refresh) > 900:
         try:
             # Close old connection if exists
             if st.session_state.conn:
                 st.session_state.conn.close()
-            
-            # Get connection details from environment
-            databricks_host = os.environ.get('DATABRICKS_HOST')
-            lakebase_project = os.environ.get('LAKEBASE_PROJECT', 'ticketingsystem')
-            lakebase_branch = os.environ.get('LAKEBASE_BRANCH', 'production')
-            client_id = os.environ.get('DATABRICKS_CLIENT_ID')
-            
-            if not databricks_host:
-                raise ValueError("DATABRICKS_HOST not found in environment")
-            
-            # Construct Lakebase hostname
-            # Format: <project>-<branch>.lakebase.<workspace-host>
-            lakebase_host = f"{lakebase_project}-{lakebase_branch}.lakebase.{databricks_host}"
-            
-            # Get OAuth token
+
+            # Use connection details injected by the Databricks Apps runtime
+            host = os.environ.get('PGHOST')
+            port = os.environ.get('PGPORT', '5432')
+            dbname = os.environ.get('PGDATABASE', 'databricks_postgres')
+            db_user = os.environ.get('PGUSER')
+            sslmode = os.environ.get('PGSSLMODE', 'require')
+
+            if not all([host, db_user]):
+                raise ValueError("PGHOST/PGUSER not found in environment")
+
+            # Get fresh OAuth token
             token = get_oauth_token()
-            
-            # Use client_id as database user
-            db_user = client_id
-            
+
             # Create new connection
             st.session_state.conn = psycopg.connect(
-                host=lakebase_host,
-                dbname="databricks_postgres",
+                host=host,
+                dbname=dbname,
                 user=db_user,
-                port=5432,
+                port=port,
                 password=token,
-                sslmode="require",
+                sslmode=sslmode,
                 connect_timeout=10
             )
+            ensure_schema(st.session_state.conn)
             st.session_state.last_token_refresh = current_time
-            
+
         except Exception as e:
             st.error(f"Database connection failed: {e}")
-            st.error(f"Host: {lakebase_host if 'lakebase_host' in locals() else 'unknown'}")
+            st.error(f"Host: {host if 'host' in locals() else 'unknown'}")
             st.error(f"User: {db_user if 'db_user' in locals() else 'unknown'}")
             return None
-    
+
     return st.session_state.conn
 
 def get_tickets_by_status(status):

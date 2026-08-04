@@ -6,12 +6,8 @@ command:
   - "$DATABRICKS_APP_PORT"
 
 env:
-  - name: LAKEBASE_PROJECT
-    value: "ticketingsystem"
-  - name: LAKEBASE_BRANCH
-    value: "production"
   - name: LAKEBASE_ENDPOINT
-    value: "projects/ticketingsystem/branches/production/endpoints/primary"
+    valueFrom: postgres
 
 resources:
   - name: lakebase-ticketingsystem
