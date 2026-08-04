@@ -28,22 +28,41 @@ def get_db_connection():
             if st.session_state.conn:
                 st.session_state.conn.close()
             
-            # Generate new token
-            endpoint_name = "projects/ticketingsystem/branches/production/endpoints/primary"
-            token = w.postgres.generate_database_credential(endpoint=endpoint_name).token
+            # Get workspace host from Databricks SDK
+            workspace_host = w.config.host.replace('https://', '')
+            
+            # Construct Lakebase endpoint hostname
+            # Format: <project>-<branch>.lakebase.<workspace-domain>
+            # Example: ticketingsystem-production.lakebase.dbc-xxxxx.cloud.databricks.com
+            host_parts = workspace_host.split('.')
+            lakebase_host = f"ticketingsystem-production.lakebase.{'.'.join(host_parts)}"
+            
+            # Get OAuth token
+            # Use workspace token as password for Lakebase
+            token = w.config.token
+            
+            # Get current user for connection
+            try:
+                current_user_email = w.current_user.me().user_name
+            except:
+                current_user_email = "app-user"
             
             # Create new connection
             st.session_state.conn = psycopg.connect(
-                host=os.environ.get('PGHOST'),
-                dbname=os.environ.get('PGDATABASE', 'databricks_postgres'),
-                user=os.environ.get('PGUSER'),
-                port=os.environ.get('PGPORT', 5432),
+                host=lakebase_host,
+                dbname="databricks_postgres",
+                user=current_user_email,
+                port=5432,
                 password=token,
-                sslmode="require"
+                sslmode="require",
+                connect_timeout=10
             )
             st.session_state.last_token_refresh = current_time
+            
         except Exception as e:
             st.error(f"Database connection failed: {e}")
+            st.error(f"Tried to connect to: {lakebase_host if 'lakebase_host' in locals() else 'unknown'}")
+            st.error(f"Workspace: {w.config.host}")
             return None
     
     return st.session_state.conn
