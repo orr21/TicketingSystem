@@ -256,7 +256,7 @@ def render_ticket_card(ticket):
 
 def show_ticket_modal():
     """Show ticket details modal"""
-    if 'selected_ticket' not in st.session_state:
+    if not st.session_state.get('selected_ticket'):
         return
     
     ticket_id = st.session_state.selected_ticket
