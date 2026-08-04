@@ -40,7 +40,20 @@ def ensure_schema(conn):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium'")
+        try:
+            cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium'")
+        except Exception:
+            conn.rollback()
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'tickets' AND column_name = 'priority'"
+            )
+            if cur.fetchone()[0] == 0:
+                raise RuntimeError(
+                    "Cannot add the 'priority' column to the tickets table because the app is "
+                    "not the table owner. Run this in the Lakebase SQL Editor as the owner: "
+                    "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium';"
+                )
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ticket_messages (
                 message_id SERIAL PRIMARY KEY,
