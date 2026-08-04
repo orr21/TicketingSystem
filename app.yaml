@@ -8,5 +8,6 @@ resources:
   - name: lakebase-ticketingsystem
     lakebase:
       postgres:
+        project: ticketingsystem
         branch: production
         database: databricks_postgres
