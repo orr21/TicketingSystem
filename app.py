@@ -281,11 +281,23 @@ def update_ticket_priority(ticket_id, new_priority):
         st.error(f"Failed to update priority: {e}")
         return False
 
+PRIORITY_COLORS = {
+    'urgent': (244, 67, 54),
+    'high': (255, 152, 0),
+    'medium': (255, 193, 7),
+    'low': (76, 175, 80),
+}
+
 def render_ticket_card(ticket):
     """Render a ticket card"""
+    r, g, b = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
     st.markdown(f"**{ticket['title']}**")
     st.caption(f"#{ticket['ticket_id']} • {ticket['message_count']} messages")
-    st.caption(f"Priority: {ticket['priority']} • Created by: {ticket['created_by']}")
+    st.markdown(
+        f"<small>Priority: <strong style='color: rgb({r}, {g}, {b})'>{ticket['priority']}</strong>"
+        f" · {ticket['created_by']}</small>",
+        unsafe_allow_html=True,
+    )
     if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
         st.session_state.selected_ticket = ticket['ticket_id']
 
@@ -395,19 +407,6 @@ def show_ticket_modal():
     
     ticket_dialog()
 
-# Debug section (remove after testing)
-with st.expander("🔍 Debug: Environment Variables", expanded=False):
-    st.write("**Lakebase Resource Env Vars:**")
-    lakebase_vars = {k: v for k, v in os.environ.items() if 'LAKEBASE' in k or 'PG' in k or 'POSTGRES' in k}
-    if lakebase_vars:
-        st.json(lakebase_vars)
-    else:
-        st.warning("No Lakebase or PostgreSQL environment variables found!")
-    
-    st.write("**All Environment Variables:**")
-    if st.checkbox("Show all env vars"):
-        st.json(dict(os.environ))
-
 # Main app
 st.title("🎫 Ticketing System")
 
@@ -456,6 +455,17 @@ def render_column(key, label, tickets):
         for ticket in tickets:
             with st.container(key=f"ticket_{ticket['ticket_id']}", border=True):
                 render_ticket_card(ticket)
+    if tickets:
+        styles = []
+        for ticket in tickets:
+            r, g, b = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
+            styles.append(
+                f"div.st-key-ticket_{ticket['ticket_id']} [data-testid='stVerticalBlock'] {{"
+                f"background-color: rgba({r}, {g}, {b}, 0.12) !important;"
+                f"border-radius: 8px;"
+                f"}}"
+            )
+        st.markdown(f"<style>{''.join(styles)}</style>", unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns(3)
 with col1:
