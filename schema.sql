@@ -6,9 +6,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     ticket_id SERIAL PRIMARY KEY,
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
+    priority TEXT NOT NULL DEFAULT 'medium',
     created_by TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium';
 
 CREATE TABLE IF NOT EXISTS ticket_messages (
     message_id SERIAL PRIMARY KEY,
@@ -19,11 +22,11 @@ CREATE TABLE IF NOT EXISTS ticket_messages (
 );
 
 WITH new_tickets AS (
-    INSERT INTO tickets (title, status, created_by)
+    INSERT INTO tickets (title, status, priority, created_by)
     VALUES
-        ('Cannot log in to VPN', 'open', 'alice@example.com'),
-        ('Billing discrepancy on invoice #2041', 'in_progress', 'bob@example.com'),
-        ('Databricks app deploy failing', 'resolved', 'carol@example.com')
+        ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
+        ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
+        ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com')
     ON CONFLICT DO NOTHING
     RETURNING ticket_id, title
 )

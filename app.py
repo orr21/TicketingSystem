@@ -35,10 +35,12 @@ def ensure_schema(conn):
                 ticket_id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'open',
+                priority TEXT NOT NULL DEFAULT 'medium',
                 created_by TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cur.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium'")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ticket_messages (
                 message_id SERIAL PRIMARY KEY,
@@ -51,15 +53,15 @@ def ensure_schema(conn):
         cur.execute("SELECT COUNT(*) FROM tickets")
         if cur.fetchone()[0] == 0:
             sample_tickets = [
-                ('Cannot log in to VPN', 'open', 'alice@example.com'),
-                ('Billing discrepancy on invoice #2041', 'in_progress', 'bob@example.com'),
-                ('Databricks app deploy failing', 'resolved', 'carol@example.com'),
+                ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
+                ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
+                ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com'),
             ]
             ticket_ids = []
-            for title, status, created_by in sample_tickets:
+            for title, status, priority, created_by in sample_tickets:
                 cur.execute(
-                    "INSERT INTO tickets (title, status, created_by) VALUES (%s, %s, %s) RETURNING ticket_id",
-                    (title, status, created_by),
+                    "INSERT INTO tickets (title, status, priority, created_by) VALUES (%s, %s, %s, %s) RETURNING ticket_id",
+                    (title, status, priority, created_by),
                 )
                 ticket_ids.append(cur.fetchone()[0])
             sample_messages = [
@@ -130,7 +132,7 @@ def get_tickets_by_status(status):
     
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT ticket_id, title, status, created_by, created_at,
+            SELECT ticket_id, title, status, priority, created_by, created_at,
                    (SELECT COUNT(*) FROM ticket_messages WHERE ticket_id = tickets.ticket_id) as message_count
             FROM tickets
             WHERE status = %s
@@ -143,9 +145,10 @@ def get_tickets_by_status(status):
                 'ticket_id': row[0],
                 'title': row[1],
                 'status': row[2],
-                'created_by': row[3],
-                'created_at': row[4],
-                'message_count': row[5]
+                'priority': row[3],
+                'created_by': row[4],
+                'created_at': row[5],
+                'message_count': row[6]
             })
     
     return tickets
@@ -175,7 +178,7 @@ def get_ticket_messages(ticket_id):
     
     return messages
 
-def create_ticket(title, status='open'):
+def create_ticket(title, status='open', priority='medium'):
     """Create a new ticket"""
     conn = get_db_connection()
     if not conn:
@@ -187,10 +190,10 @@ def create_ticket(title, status='open'):
         
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO tickets (title, status, created_by)
-                VALUES (%s, %s, %s)
+                INSERT INTO tickets (title, status, priority, created_by)
+                VALUES (%s, %s, %s, %s)
                 RETURNING ticket_id
-            """, (title, status, current_user))
+            """, (title, status, priority, current_user))
             
             ticket_id = cur.fetchone()[0]
             conn.commit()
@@ -244,11 +247,32 @@ def update_ticket_status(ticket_id, new_status):
         st.error(f"Failed to update ticket: {e}")
         return False
 
+def update_ticket_priority(ticket_id, new_priority):
+    """Update ticket priority"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE tickets
+                SET priority = %s
+                WHERE ticket_id = %s
+            """, (new_priority, ticket_id))
+            
+            conn.commit()
+            return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Failed to update priority: {e}")
+        return False
+
 def render_ticket_card(ticket):
     """Render a ticket card"""
     st.markdown(f"**{ticket['title']}**")
     st.caption(f"#{ticket['ticket_id']} • {ticket['message_count']} messages")
-    st.caption(f"Created by: {ticket['created_by']}")
+    st.caption(f"Priority: {ticket['priority']} • Created by: {ticket['created_by']}")
     if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
         st.session_state.selected_ticket = ticket['ticket_id']
 
@@ -266,7 +290,7 @@ def show_ticket_modal():
     
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT ticket_id, title, status, created_by, created_at
+            SELECT ticket_id, title, status, priority, created_by, created_at
             FROM tickets
             WHERE ticket_id = %s
         """, (ticket_id,))
@@ -280,8 +304,9 @@ def show_ticket_modal():
             'ticket_id': row[0],
             'title': row[1],
             'status': row[2],
-            'created_by': row[3],
-            'created_at': row[4]
+            'priority': row[3],
+            'created_by': row[4],
+            'created_at': row[5]
         }
     
     # Show modal
@@ -307,6 +332,20 @@ def show_ticket_modal():
                     if update_ticket_status(ticket_id, new_status):
                         st.success("Status updated!")
                         st.session_state.selected_ticket = None
+                        st.rerun()
+            
+            # Priority selector
+            new_priority = st.selectbox(
+                "Priority",
+                options=['low', 'medium', 'high', 'urgent'],
+                index=['low', 'medium', 'high', 'urgent'].index(ticket['priority']),
+                key=f"priority_{ticket_id}"
+            )
+            
+            if new_priority != ticket['priority']:
+                if st.button("Update Priority", key=f"update_priority_{ticket_id}"):
+                    if update_ticket_priority(ticket_id, new_priority):
+                        st.success("Priority updated!")
                         st.rerun()
         
         st.divider()
@@ -368,9 +407,15 @@ with st.expander("➕ Create New Ticket", expanded=False):
         index=0,
         key="new_ticket_status"
     )
+    new_ticket_priority = st.selectbox(
+        "Priority",
+        options=['low', 'medium', 'high', 'urgent'],
+        index=1,
+        key="new_ticket_priority"
+    )
     
     if st.button("Create Ticket", key="create_ticket", type="primary", disabled=not new_ticket_title):
-        ticket_id = create_ticket(new_ticket_title, new_ticket_status)
+        ticket_id = create_ticket(new_ticket_title, new_ticket_status, new_ticket_priority)
         if ticket_id:
             st.success(f"Ticket #{ticket_id} created successfully!")
             st.rerun()
