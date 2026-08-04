@@ -17,6 +17,35 @@ if 'conn' not in st.session_state or 'last_token_refresh' not in st.session_stat
     st.session_state.last_token_refresh = 0
     st.session_state.conn = None
 
+def get_oauth_token():
+    """Get OAuth token using client credentials"""
+    import requests
+    
+    client_id = os.environ.get('DATABRICKS_CLIENT_ID')
+    client_secret = os.environ.get('DATABRICKS_CLIENT_SECRET')
+    databricks_host = os.environ.get('DATABRICKS_HOST')
+    
+    if not all([client_id, client_secret, databricks_host]):
+        raise ValueError("Missing OAuth credentials in environment")
+    
+    # OAuth token endpoint
+    token_url = f"https://{databricks_host}/oidc/v1/token"
+    
+    # Request access token
+    response = requests.post(
+        token_url,
+        data={
+            'grant_type': 'client_credentials',
+            'scope': 'all-apis'
+        },
+        auth=(client_id, client_secret)
+    )
+    
+    if response.status_code != 200:
+        raise ValueError(f"Failed to get OAuth token: {response.text}")
+    
+    return response.json()['access_token']
+
 def get_db_connection():
     """Get database connection with automatic token refresh"""
     current_time = time.time()
@@ -28,30 +57,30 @@ def get_db_connection():
             if st.session_state.conn:
                 st.session_state.conn.close()
             
-            # Get workspace host from Databricks SDK
-            workspace_host = w.config.host.replace('https://', '')
+            # Get connection details from environment
+            databricks_host = os.environ.get('DATABRICKS_HOST')
+            lakebase_project = os.environ.get('LAKEBASE_PROJECT', 'ticketingsystem')
+            lakebase_branch = os.environ.get('LAKEBASE_BRANCH', 'production')
+            client_id = os.environ.get('DATABRICKS_CLIENT_ID')
             
-            # Construct Lakebase endpoint hostname
-            # Format: <project>-<branch>.lakebase.<workspace-domain>
-            # Example: ticketingsystem-production.lakebase.dbc-xxxxx.cloud.databricks.com
-            host_parts = workspace_host.split('.')
-            lakebase_host = f"ticketingsystem-production.lakebase.{'.'.join(host_parts)}"
+            if not databricks_host:
+                raise ValueError("DATABRICKS_HOST not found in environment")
+            
+            # Construct Lakebase hostname
+            # Format: <project>-<branch>.lakebase.<workspace-host>
+            lakebase_host = f"{lakebase_project}-{lakebase_branch}.lakebase.{databricks_host}"
             
             # Get OAuth token
-            # Use workspace token as password for Lakebase
-            token = w.config.token
+            token = get_oauth_token()
             
-            # Get current user for connection
-            try:
-                current_user_email = w.current_user.me().user_name
-            except:
-                current_user_email = "app-user"
+            # Use client_id as database user
+            db_user = client_id
             
             # Create new connection
             st.session_state.conn = psycopg.connect(
                 host=lakebase_host,
                 dbname="databricks_postgres",
-                user=current_user_email,
+                user=db_user,
                 port=5432,
                 password=token,
                 sslmode="require",
@@ -61,8 +90,8 @@ def get_db_connection():
             
         except Exception as e:
             st.error(f"Database connection failed: {e}")
-            st.error(f"Tried to connect to: {lakebase_host if 'lakebase_host' in locals() else 'unknown'}")
-            st.error(f"Workspace: {w.config.host}")
+            st.error(f"Host: {lakebase_host if 'lakebase_host' in locals() else 'unknown'}")
+            st.error(f"User: {db_user if 'db_user' in locals() else 'unknown'}")
             return None
     
     return st.session_state.conn
