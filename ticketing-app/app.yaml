@@ -1,0 +1,12 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "$DATABRICKS_APP_PORT"
+resources:
+  - name: lakebase-ticketingsystem
+    lakebase:
+      postgres:
+        branch: production
+        database: databricks_postgres
