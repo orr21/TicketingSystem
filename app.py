@@ -5,6 +5,7 @@ import time
 from databricks.sdk import WorkspaceClient
 from datetime import datetime
 import pandas as pd
+from streamlit_dnd import dnd
 
 # Page configuration
 st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
@@ -245,14 +246,12 @@ def update_ticket_status(ticket_id, new_status):
 
 def render_ticket_card(ticket):
     """Render a ticket card"""
-    with st.container(border=True):
-        st.markdown(f"**{ticket['title']}**")
-        st.caption(f"#{ticket['ticket_id']} • {ticket['message_count']} messages")
-        st.caption(f"Created by: {ticket['created_by']}")
-        
-        if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
-            st.session_state.selected_ticket = ticket['ticket_id']
-            st.rerun()
+    st.markdown(f"**{ticket['title']}**")
+    st.caption(f"#{ticket['ticket_id']} • {ticket['message_count']} messages")
+    st.caption(f"Created by: {ticket['created_by']}")
+    if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
+        st.session_state.selected_ticket = ticket['ticket_id']
+        st.rerun()
 
 def show_ticket_modal():
     """Show ticket details modal"""
@@ -379,7 +378,7 @@ with st.expander("➕ Create New Ticket", expanded=False):
 
 st.divider()
 
-# Kanban board
+# Kanban board (drag & drop)
 st.subheader("Ticket Board")
 
 # Fetch tickets for each status
@@ -387,51 +386,34 @@ open_tickets = get_tickets_by_status('open')
 in_progress_tickets = get_tickets_by_status('in_progress')
 resolved_tickets = get_tickets_by_status('resolved')
 
-# Create three columns for Kanban
+COLUMN_STATUS = {
+    "col_open": "open",
+    "col_in_progress": "in_progress",
+    "col_resolved": "resolved",
+}
+
+def render_column(key, label, tickets):
+    st.markdown(f"### {label}")
+    st.caption(f"{len(tickets)} tickets")
+    with st.container(key=key, border=True):
+        for ticket in tickets:
+            with st.container(key=f"ticket_{ticket['ticket_id']}", border=True):
+                render_ticket_card(ticket)
+
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.markdown("### 📋 Open")
-    st.caption(f"{len(open_tickets)} tickets")
-    for ticket in open_tickets:
-        render_ticket_card(ticket)
-        
-        # Move to In Progress button
-        if st.button("→ Move to In Progress", key=f"move_ip_{ticket['ticket_id']}", use_container_width=True):
-            if update_ticket_status(ticket['ticket_id'], 'in_progress'):
-                st.success("Ticket moved!")
-                st.rerun()
-
+    render_column("col_open", "📋 Open", open_tickets)
 with col2:
-    st.markdown("### 🔄 In Progress")
-    st.caption(f"{len(in_progress_tickets)} tickets")
-    for ticket in in_progress_tickets:
-        render_ticket_card(ticket)
-        
-        # Move buttons
-        col_left, col_right = st.columns(2)
-        with col_left:
-            if st.button("← Open", key=f"move_open_{ticket['ticket_id']}", use_container_width=True):
-                if update_ticket_status(ticket['ticket_id'], 'open'):
-                    st.success("Ticket moved!")
-                    st.rerun()
-        with col_right:
-            if st.button("Resolved →", key=f"move_resolved_{ticket['ticket_id']}", use_container_width=True):
-                if update_ticket_status(ticket['ticket_id'], 'resolved'):
-                    st.success("Ticket moved!")
-                    st.rerun()
-
+    render_column("col_in_progress", "🔄 In Progress", in_progress_tickets)
 with col3:
-    st.markdown("### ✅ Resolved")
-    st.caption(f"{len(resolved_tickets)} tickets")
-    for ticket in resolved_tickets:
-        render_ticket_card(ticket)
-        
-        # Move to In Progress button
-        if st.button("← Move to In Progress", key=f"move_ip_from_res_{ticket['ticket_id']}", use_container_width=True):
-            if update_ticket_status(ticket['ticket_id'], 'in_progress'):
-                st.success("Ticket moved!")
-                st.rerun()
+    render_column("col_resolved", "✅ Resolved", resolved_tickets)
+
+event = dnd("col_open", "col_in_progress", "col_resolved", handle="border", key="kanban_dnd")
+if event and event.item_key and event.item_key.startswith("ticket_"):
+    ticket_id = int(event.item_key.split("_", 1)[1])
+    target_status = COLUMN_STATUS.get(event.to_container)
+    if target_status and update_ticket_status(ticket_id, target_status):
+        st.rerun()
 
 # Show modal if a ticket is selected
 show_ticket_modal()
