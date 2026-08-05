@@ -37,7 +37,9 @@ def ensure_schema(conn):
                 status TEXT NOT NULL DEFAULT 'open',
                 priority TEXT NOT NULL DEFAULT 'medium',
                 created_by TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT tickets_status_check CHECK (status IN ('open', 'in_progress', 'resolved')),
+                CONSTRAINT tickets_priority_check CHECK (priority IN ('low', 'medium', 'high', 'urgent'))
             )
         """)
         try:
@@ -54,6 +56,18 @@ def ensure_schema(conn):
                     "not the table owner. Run this in the Lakebase SQL Editor as the owner: "
                     "ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium';"
                 )
+        try:
+            cur.execute(
+                "ALTER TABLE tickets DROP CONSTRAINT IF EXISTS tickets_status_check;"
+                "ALTER TABLE tickets ADD CONSTRAINT tickets_status_check "
+                "CHECK (status IN ('open', 'in_progress', 'resolved'));"
+                "ALTER TABLE tickets DROP CONSTRAINT IF EXISTS tickets_priority_check;"
+                "ALTER TABLE tickets ADD CONSTRAINT tickets_priority_check "
+                "CHECK (priority IN ('low', 'medium', 'high', 'urgent'));"
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS ticket_messages (
                 message_id SERIAL PRIMARY KEY,
