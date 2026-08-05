@@ -207,6 +207,14 @@ def get_ticket_messages(ticket_id):
 
 def create_ticket(title, status='open', priority='medium'):
     """Create a new ticket"""
+    title = (title or '').strip()
+    if not title:
+        st.error("Ticket title cannot be empty")
+        return None
+    if status not in VALID_STATUSES or priority not in VALID_PRIORITIES:
+        st.error(f"Invalid status '{status}' or priority '{priority}'")
+        return None
+
     conn = get_db_connection()
     if not conn:
         return None
@@ -232,6 +240,11 @@ def create_ticket(title, status='open', priority='medium'):
 
 def add_message(ticket_id, message_text):
     """Add a message to a ticket"""
+    message_text = (message_text or '').strip()
+    if not message_text:
+        st.error("Message cannot be empty")
+        return False
+
     conn = get_db_connection()
     if not conn:
         return False
@@ -255,6 +268,10 @@ def add_message(ticket_id, message_text):
 
 def update_ticket_status(ticket_id, new_status):
     """Update ticket status"""
+    if new_status not in VALID_STATUSES:
+        st.error(f"Invalid status '{new_status}'")
+        return False
+
     conn = get_db_connection()
     if not conn:
         return False
@@ -276,6 +293,10 @@ def update_ticket_status(ticket_id, new_status):
 
 def update_ticket_priority(ticket_id, new_priority):
     """Update ticket priority"""
+    if new_priority not in VALID_PRIORITIES:
+        st.error(f"Invalid priority '{new_priority}'")
+        return False
+
     conn = get_db_connection()
     if not conn:
         return False
@@ -294,6 +315,9 @@ def update_ticket_priority(ticket_id, new_priority):
         conn.rollback()
         st.error(f"Failed to update priority: {e}")
         return False
+
+VALID_STATUSES = ['open', 'in_progress', 'resolved']
+VALID_PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
 PRIORITY_COLORS = {
     'urgent': (244, 67, 54),
@@ -361,8 +385,8 @@ def show_ticket_modal():
             # Status selector
             new_status = st.selectbox(
                 "Status",
-                options=['open', 'in_progress', 'resolved'],
-                index=['open', 'in_progress', 'resolved'].index(ticket['status']),
+                options=VALID_STATUSES,
+                index=VALID_STATUSES.index(ticket['status']),
                 key=f"status_{ticket_id}"
             )
             
@@ -376,8 +400,8 @@ def show_ticket_modal():
             # Priority selector
             new_priority = st.selectbox(
                 "Priority",
-                options=['low', 'medium', 'high', 'urgent'],
-                index=['low', 'medium', 'high', 'urgent'].index(ticket['priority']),
+                options=VALID_PRIORITIES,
+                index=VALID_PRIORITIES.index(ticket['priority']),
                 key=f"priority_{ticket_id}"
             )
             
@@ -429,13 +453,13 @@ with st.expander("➕ Create New Ticket", expanded=False):
     new_ticket_title = st.text_input("Ticket Title", key="new_ticket_title")
     new_ticket_status = st.selectbox(
         "Initial Status",
-        options=['open', 'in_progress', 'resolved'],
+        options=VALID_STATUSES,
         index=0,
         key="new_ticket_status"
     )
     new_ticket_priority = st.selectbox(
         "Priority",
-        options=['low', 'medium', 'high', 'urgent'],
+        options=VALID_PRIORITIES,
         index=1,
         key="new_ticket_priority"
     )
