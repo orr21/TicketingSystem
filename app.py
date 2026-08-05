@@ -390,6 +390,34 @@ def update_ticket_priority(ticket_id, new_priority):
         st.error(f"Failed to update priority: {e}")
         return False
 
+def update_ticket(ticket_id, new_status=None, new_priority=None):
+    """Update a ticket's status and/or priority in a single transaction"""
+    if new_status is not None and new_status not in VALID_STATUSES:
+        st.error(f"Invalid status '{new_status}'")
+        return False
+    if new_priority is not None and new_priority not in VALID_PRIORITIES:
+        st.error(f"Invalid priority '{new_priority}'")
+        return False
+
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE tickets
+                SET status = COALESCE(%s, status),
+                    priority = COALESCE(%s, priority)
+                WHERE ticket_id = %s
+            """, (new_status, new_priority, ticket_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Failed to update ticket: {e}")
+        return False
+
 VALID_STATUSES = ['open', 'in_progress', 'resolved']
 VALID_PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
@@ -521,7 +549,6 @@ APP_CSS = """
 
 .stApp { background: var(--n0); }
 [data-testid="stHeader"] { background: transparent; }
-[data-testid="stToolbar"] { display: none; }
 #MainMenu { display: none; }
 html, body, [class*="css"] {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Noto Sans',
@@ -679,6 +706,32 @@ section[data-testid="stSidebar"] .stButton > button { width: 100%; }
     color: var(--b400);
 }
 
+/* Clickable whole card: an invisible full-size button overlays the card,
+   while the DnD handle (z-index 10) stays above it so dragging still works. */
+[class*="st-key-ticket_"] { position: relative; }
+[class*="st-key-ticket_"] > [data-testid="stElementContainer"] { position: static; }
+[class*="st-key-ticket_"] [data-testid="stButton"] {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 5;
+}
+[class*="st-key-ticket_"] [data-testid="stButton"] > button {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    margin: 0;
+    color: transparent;
+    cursor: pointer;
+}
+[class*="st-key-ticket_"]:hover .ticket-card {
+    box-shadow: var(--card-shadow-hover);
+    background: var(--n10);
+}
+[class*="st-key-ticket_"] .stdnd-handle { z-index: 20; }
+
 /* ---------- Widgets ---------- */
 .stButton > button {
     border-radius: 3px;
@@ -739,7 +792,14 @@ section[data-testid="stSidebar"] .stButton > button { width: 100%; }
 .comment-author { font-size: 14px; font-weight: 600; color: var(--n800); }
 .comment-you { font-size: 11px; color: var(--b400); font-weight: 500; }
 .comment-time { font-size: 12px; color: var(--n400); }
-.comment-text { font-size: 14px; color: var(--n800); line-height: 1.5; word-wrap: break-word; }
+.comment-body [data-testid="stMarkdownContainer"] {
+    font-size: 14px;
+    color: var(--n800);
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+.comment-body [data-testid="stMarkdown"] p { margin: 0 0 4px 0; }
+.comment-body [data-testid="stMarkdown"] p:last-child { margin-bottom: 0; }
 .msg-empty { color: var(--n400); font-size: 14px; }
 
 /* ---------- Danger zone ---------- */
@@ -777,7 +837,7 @@ def render_ticket_card(ticket):
         """,
         unsafe_allow_html=True,
     )
-    if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
+    if st.button("", key=f"open_{ticket['ticket_id']}", use_container_width=True):
         st.session_state.show_new_ticket = False
         st.session_state.selected_ticket = ticket['ticket_id']
 
@@ -786,23 +846,18 @@ def render_message(msg, current_user):
     mine = author == current_user
     you_badge = '<span class="comment-you">· You</span>' if mine else ''
     st.markdown(
-        f"""
-        <div class="comment">
-            <div class="comment-avatar" style="background:{avatar_color(author)}">
-                {html.escape(author[0].upper())}
-            </div>
+        f"""<div class="comment">
+            <div class="comment-avatar" style="background:{avatar_color(author)}">{html.escape(author[0].upper())}</div>
             <div class="comment-body">
                 <div class="comment-head">
-                    <span class="comment-author">{html.escape(author)}</span>
-                    {you_badge}
+                    <span class="comment-author">{html.escape(author)}</span>{you_badge}
                     <span class="comment-time">{time_ago(msg['created_at'])}</span>
                 </div>
-                <div class="comment-text">{html.escape(msg['message_text'])}</div>
-            </div>
-        </div>
         """,
         unsafe_allow_html=True,
     )
+    st.markdown(msg['message_text'] or '')
+    st.markdown('</div></div>', unsafe_allow_html=True)
 
 def show_ticket_modal():
     """Show ticket details modal"""
@@ -859,28 +914,32 @@ def show_ticket_modal():
             unsafe_allow_html=True,
         )
 
+        def save_on_change():
+            new_status = st.session_state.get(f"status_{ticket_id}")
+            new_priority = st.session_state.get(f"priority_{ticket_id}")
+            if update_ticket(ticket_id, new_status, new_priority):
+                st.session_state.ticket_updated = True
+
         c1, c2 = st.columns(2)
         with c1:
-            new_status = st.selectbox(
+            st.selectbox(
                 "Status",
                 options=VALID_STATUSES,
                 index=VALID_STATUSES.index(ticket['status']),
-                key=f"status_{ticket_id}"
+                key=f"status_{ticket_id}",
+                on_change=save_on_change,
             )
-            if st.button("Update Status", key=f"update_status_{ticket_id}", disabled=new_status == ticket['status']):
-                if update_ticket_status(ticket_id, new_status):
-                    st.session_state.selected_ticket = None
-                    st.rerun()
         with c2:
-            new_priority = st.selectbox(
+            st.selectbox(
                 "Priority",
                 options=VALID_PRIORITIES,
                 index=VALID_PRIORITIES.index(ticket['priority']),
-                key=f"priority_{ticket_id}"
+                key=f"priority_{ticket_id}",
+                on_change=save_on_change,
             )
-            if st.button("Update Priority", key=f"update_priority_{ticket_id}", disabled=new_priority == ticket['priority']):
-                if update_ticket_priority(ticket_id, new_priority):
-                    st.rerun()
+
+        if st.session_state.pop("ticket_updated", False):
+            st.rerun()
 
         st.divider()
 
