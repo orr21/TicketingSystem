@@ -59,9 +59,33 @@ app.py            Streamlit application (UI + DB access)
 app.yaml          Databricks Apps configuration (command, env, resources)
 schema.sql        Lakebase DDL + sample data, runnable in the Lakebase SQL Editor
 requirements.txt  Python dependencies
+docker-compose.yml  Local Postgres for dev (host port 5433)
+Makefile          Dev workflow: install / db-up / db-down / db-reset / run / test
+tests/            AppTest smoke test
+.streamlit/       Streamlit theme + server config
 ```
 
 ## Local development
+
+### Quick start (Docker + local Postgres — no Databricks/Lakebase needed)
+
+The app ships with a "dev mode": if `LAKEBASE_ENDPOINT`/`ENDPOINT_NAME` are not set,
+it connects to a plain Postgres using `PGPASSWORD` and uses `DEV_USER` as the author —
+no OAuth, no Databricks auth required.
+
+```bash
+make install        # create .venv + install dependencies
+make db-up          # start a local Postgres container (port 5433)
+make run            # start the app at http://localhost:8501 (creates .env from .env.example)
+```
+
+- `make test` runs a smoke test (renders the app against the local DB and creates/deletes a ticket).
+- `make db-reset` drops all tables so the app re-provisions + re-seeds on next run.
+- `make db-down` / `make clean` stop the container / remove everything.
+- Config lives in `.env` (gitignored); defaults are in `.env.example`. The DB is
+  seeded with sample data on first connect.
+
+### Against real Lakebase
 
 ```bash
 databricks auth login

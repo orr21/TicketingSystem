@@ -7,12 +7,28 @@ from databricks.sdk import WorkspaceClient
 from datetime import datetime, timezone
 import pandas as pd
 from streamlit_dnd import dnd
+from dotenv import load_dotenv
+
+# Load local .env overrides (no-op in the Databricks Apps runtime)
+load_dotenv()
 
 # Page configuration
 st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide", initial_sidebar_state="expanded")
 
-# Initialize Databricks client and connection
-w = WorkspaceClient()
+def _is_lakebase():
+    """True when running against Lakebase (OAuth token auth) vs a local Postgres"""
+    return bool(os.environ.get('LAKEBASE_ENDPOINT') or os.environ.get('ENDPOINT_NAME'))
+
+def _init_workspace():
+    """Create the Databricks WorkspaceClient lazily; returns None when not available
+    (e.g. local dev without Databricks auth)."""
+    try:
+        return WorkspaceClient()
+    except Exception:
+        return None
+
+# Initialize Databricks client (only needed for Lakebase mode)
+w = _init_workspace()
 
 # Global connection state
 if 'conn' not in st.session_state or 'last_token_refresh' not in st.session_state:
@@ -24,6 +40,9 @@ def get_oauth_token():
     endpoint = os.environ.get('LAKEBASE_ENDPOINT') or os.environ.get('ENDPOINT_NAME')
     if not endpoint:
         raise ValueError("LAKEBASE_ENDPOINT not found in environment")
+
+    if w is None:
+        raise RuntimeError("WorkspaceClient is not available; cannot mint an OAuth database credential")
 
     credential = w.postgres.generate_database_credential(endpoint=endpoint)
     return credential.token
@@ -132,6 +151,7 @@ def get_db_connection():
                 st.session_state.conn.close()
 
             # Use connection details injected by the Databricks Apps runtime
+            # (or set in .env for local dev)
             host = os.environ.get('PGHOST')
             port = os.environ.get('PGPORT', '5432')
             dbname = os.environ.get('PGDATABASE', 'databricks_postgres')
@@ -141,8 +161,11 @@ def get_db_connection():
             if not all([host, db_user]):
                 raise ValueError("PGHOST/PGUSER not found in environment")
 
-            # Get fresh OAuth token
-            token = get_oauth_token()
+            # Password: OAuth token for Lakebase, plain PGPASSWORD for a local Postgres
+            if _is_lakebase():
+                password = get_oauth_token()
+            else:
+                password = os.environ.get('PGPASSWORD', '')
 
             # Create new connection
             st.session_state.conn = psycopg.connect(
@@ -150,7 +173,7 @@ def get_db_connection():
                 dbname=dbname,
                 user=db_user,
                 port=port,
-                password=token,
+                password=password,
                 sslmode=sslmode,
                 connect_timeout=10
             )
@@ -164,6 +187,17 @@ def get_db_connection():
             return None
 
     return st.session_state.conn
+
+def get_current_user():
+    """Resolve the acting user: Databricks identity in Lakebase mode, DEV_USER locally"""
+    if not _is_lakebase():
+        return os.environ.get('DEV_USER', 'dev@example.com')
+    if w is None:
+        return 'unknown'
+    try:
+        return w.current_user.me().user_name
+    except Exception:
+        return 'unknown'
 
 def get_tickets_by_status(status, priority=None, search=None):
     """Fetch tickets by status, optionally filtered by priority and title search"""
@@ -244,7 +278,7 @@ def create_ticket(title, status='open', priority='medium'):
     
     try:
         # Get current user
-        current_user = w.current_user.me().user_name
+        current_user = get_current_user()
         
         with conn.cursor() as cur:
             cur.execute("""
@@ -274,7 +308,7 @@ def add_message(ticket_id, message_text):
     
     try:
         # Get current user
-        current_user = w.current_user.me().user_name
+        current_user = get_current_user()
         
         with conn.cursor() as cur:
             cur.execute("""
@@ -732,10 +766,7 @@ def show_ticket_modal():
             'created_at': row[5]
         }
     
-    try:
-        current_user = w.current_user.me().user_name
-    except Exception:
-        current_user = None
+    current_user = get_current_user() or 'unknown'
 
     # Show modal
     @st.dialog(f"Ticket #{ticket['ticket_id']}", width="large")

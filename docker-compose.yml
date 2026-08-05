@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16
+    container_name: ticketing-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ticketing
+    ports:
+      - "5433:5432"
+    volumes:
+      - ticketing_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ticketing"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  ticketing_pgdata:
