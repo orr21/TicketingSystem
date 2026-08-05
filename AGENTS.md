@@ -17,7 +17,7 @@ Databricks App (Streamlit) + Lakebase (managed PostgreSQL) support-ticket kanban
 - Schema is auto-provisioned at runtime (`ensure_schema`, app.py:30). **Keep `app.py` DDL in sync with `schema.sql`** — both must change together. There are three tables: `tickets`, `ticket_messages`, `app_meta`.
 - Sample data is seeded **only once**, gated by the `seed_version` key in `app_meta` — never gate seeding on "tickets table is empty" (that would re-seed after a user deletes everything).
 - The `priority` column is a post-create migration with a fallback: if the app SP is not the table owner, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` fails and it instructs the user to run the migration manually in the SQL Editor (app.py:43). Adding new columns must follow this tolerant pattern or you'll break the non-owner case. CHECK constraints are also re-applied best-effort in a try/except so shared deployments degrade gracefully.
-- All queries use `%s` parameters (psycopg 3). Use `RETURNING` + `conn.commit()`; every write wraps in try/except with `conn.rollback()`.
+- All queries use `%s` parameters (psycopg 3). **Close every transaction**: reads must `conn.commit()` too (not just writes) or the connection stays "idle in transaction" holding an ACCESS SHARE lock, which blocks `ensure_schema`'s `ALTER TABLE` and makes new connections hang. Writes wrap in try/except with `conn.rollback()`.
 
 ## Invariants
 

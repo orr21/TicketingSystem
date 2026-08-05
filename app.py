@@ -138,6 +138,8 @@ def ensure_schema(conn):
                 "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
             )
             conn.commit()
+        else:
+            conn.commit()
 
 def get_db_connection():
     """Get database connection with automatic token refresh"""
@@ -234,6 +236,7 @@ def get_tickets_by_status(status, priority=None, search=None):
                 'created_at': row[5],
                 'message_count': row[6]
             })
+    conn.commit()
     
     return tickets
 
@@ -259,6 +262,7 @@ def get_ticket_messages(ticket_id):
                 'author': row[2],
                 'created_at': row[3]
             })
+    conn.commit()
     
     return messages
 
@@ -437,6 +441,7 @@ def get_stats():
     with conn.cursor() as cur:
         cur.execute("SELECT status, priority, COUNT(*) FROM tickets GROUP BY status, priority")
         rows = cur.fetchall()
+    conn.commit()
     stats = {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0, 'urgent': 0}
     for status, priority, count in rows:
         stats['total'] += count
@@ -710,6 +715,7 @@ def render_ticket_card(ticket):
         unsafe_allow_html=True,
     )
     if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
+        st.session_state.show_new_ticket = False
         st.session_state.selected_ticket = ticket['ticket_id']
 
 def render_message(msg, current_user):
@@ -765,6 +771,7 @@ def show_ticket_modal():
             'created_by': row[4],
             'created_at': row[5]
         }
+    conn.commit()
     
     current_user = get_current_user() or 'unknown'
 
@@ -867,6 +874,7 @@ with st.sidebar:
     st.divider()
 
     if st.button("+ New Ticket", key="new_ticket_btn", type="primary", use_container_width=True):
+        st.session_state.selected_ticket = None
         st.session_state.show_new_ticket = True
 
     st.markdown("#### Filters")
@@ -881,8 +889,8 @@ with st.sidebar:
 priority_filter = None if filter_priority == "All" else filter_priority
 search_filter = filter_search.strip() or None
 
-# New ticket dialog
-if st.session_state.get('show_new_ticket'):
+# New ticket dialog (mutually exclusive with the ticket modal)
+if st.session_state.get('show_new_ticket') and not st.session_state.get('selected_ticket'):
     @st.dialog("Create New Ticket", width="small")
     def new_ticket_dialog():
         new_ticket_title = st.text_input("Ticket Title", key="new_ticket_title")
