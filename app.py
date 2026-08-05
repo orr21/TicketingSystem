@@ -106,38 +106,47 @@ def ensure_schema(conn):
         cur.execute("SELECT value FROM app_meta WHERE key = 'seed_version'")
         already_seeded = cur.fetchone() is not None
         if not already_seeded:
-            cur.execute("SELECT COUNT(*) FROM tickets")
-            if cur.fetchone()[0] == 0:
-                sample_tickets = [
-                    ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
-                    ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
-                    ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com'),
-                ]
-                ticket_ids = []
-                for title, status, priority, created_by in sample_tickets:
-                    cur.execute(
-                        "INSERT INTO tickets (title, status, priority, created_by) VALUES (%s, %s, %s, %s) RETURNING ticket_id",
-                        (title, status, priority, created_by),
-                    )
-                    ticket_ids.append(cur.fetchone()[0])
-                sample_messages = [
-                    (ticket_ids[0], 'Getting a timeout when connecting to VPN.', 'alice@example.com'),
-                    (ticket_ids[0], 'We are investigating, please share your client logs.', 'support@example.com'),
-                    (ticket_ids[1], 'Invoice shows an extra charge for last month.', 'bob@example.com'),
-                    (ticket_ids[1], 'Confirmed the overcharge, a refund is being processed.', 'support@example.com'),
-                    (ticket_ids[2], 'Deploy fails with a missing module error.', 'carol@example.com'),
-                    (ticket_ids[2], 'Fixed by pinning the dependency version.', 'support@example.com'),
-                ]
-                for ticket_id, message_text, author in sample_messages:
-                    cur.execute(
-                        "INSERT INTO ticket_messages (ticket_id, message_text, author) VALUES (%s, %s, %s)",
-                        (ticket_id, message_text, author),
-                    )
-            cur.execute(
-                "INSERT INTO app_meta (key, value) VALUES ('seed_version', '1') "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-            )
-            conn.commit()
+            # Seed atomically: drop autocommit for a single real transaction so a
+            # partial failure can't leave duplicate sample data behind.
+            conn.autocommit = False
+            try:
+                cur.execute("SELECT COUNT(*) FROM tickets")
+                if cur.fetchone()[0] == 0:
+                    sample_tickets = [
+                        ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
+                        ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
+                        ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com'),
+                    ]
+                    ticket_ids = []
+                    for title, status, priority, created_by in sample_tickets:
+                        cur.execute(
+                            "INSERT INTO tickets (title, status, priority, created_by) VALUES (%s, %s, %s, %s) RETURNING ticket_id",
+                            (title, status, priority, created_by),
+                        )
+                        ticket_ids.append(cur.fetchone()[0])
+                    sample_messages = [
+                        (ticket_ids[0], 'Getting a timeout when connecting to VPN.', 'alice@example.com'),
+                        (ticket_ids[0], 'We are investigating, please share your client logs.', 'support@example.com'),
+                        (ticket_ids[1], 'Invoice shows an extra charge for last month.', 'bob@example.com'),
+                        (ticket_ids[1], 'Confirmed the overcharge, a refund is being processed.', 'support@example.com'),
+                        (ticket_ids[2], 'Deploy fails with a missing module error.', 'carol@example.com'),
+                        (ticket_ids[2], 'Fixed by pinning the dependency version.', 'support@example.com'),
+                    ]
+                    for ticket_id, message_text, author in sample_messages:
+                        cur.execute(
+                            "INSERT INTO ticket_messages (ticket_id, message_text, author) VALUES (%s, %s, %s)",
+                            (ticket_id, message_text, author),
+                        )
+                cur.execute(
+                    "INSERT INTO app_meta (key, value) VALUES ('seed_version', '1') "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit = True
         else:
             conn.commit()
 
@@ -169,7 +178,10 @@ def get_db_connection():
             else:
                 password = os.environ.get('PGPASSWORD', '')
 
-            # Create new connection
+            # Create new connection.
+            # autocommit=True so no transaction is ever left open — this prevents
+            # "idle in transaction" connections from holding locks that block
+            # ensure_schema's DDL on the next reconnect.
             st.session_state.conn = psycopg.connect(
                 host=host,
                 dbname=dbname,
@@ -177,7 +189,8 @@ def get_db_connection():
                 port=port,
                 password=password,
                 sslmode=sslmode,
-                connect_timeout=10
+                connect_timeout=10,
+                autocommit=True
             )
             ensure_schema(st.session_state.conn)
             st.session_state.last_token_refresh = current_time
@@ -397,18 +410,33 @@ def delete_ticket(ticket_id):
         return False
 
 
+# Atlassian-inspired priority palette (Jira: red arrows up for high/urgent,
+# orange for medium, blue down arrow for low)
 PRIORITY_COLORS = {
-    'urgent': (244, 67, 54),
-    'high': (255, 152, 0),
-    'medium': (255, 193, 7),
-    'low': (76, 175, 80),
+    'urgent': (222, 53, 11),    # R300
+    'high': (255, 86, 48),      # R400-ish
+    'medium': (255, 171, 0),    # Y300
+    'low': (38, 132, 255),      # B400
+}
+
+PRIORITY_ICONS = {
+    'urgent': '⇈',
+    'high': '▲',
+    'medium': '●',
+    'low': '▼',
 }
 
 STATUS_META = {
-    'open': {'label': 'Open', 'color': '#6b5bff', 'icon': '📋'},
-    'in_progress': {'label': 'In Progress', 'color': '#f59e0b', 'icon': '🔄'},
-    'resolved': {'label': 'Resolved', 'color': '#22c55e', 'icon': '✅'},
+    'open': {'label': 'Open', 'color': '#42526E', 'tint': '#DFE1E6'},
+    'in_progress': {'label': 'In Progress', 'color': '#0052CC', 'tint': '#DEEBFF'},
+    'resolved': {'label': 'Resolved', 'color': '#006644', 'tint': '#E3FCEF'},
 }
+
+AVATAR_COLORS = ['#0052CC', '#6554C0', '#006644', '#FF5630', '#36B37E', '#FF991F', '#00B8D9', '#FFAB00']
+
+def avatar_color(name):
+    """Deterministic avatar background color from a name/email (stable across runs)"""
+    return AVATAR_COLORS[sum(ord(c) for c in (name or '?')) % len(AVATAR_COLORS)]
 
 def time_ago(dt):
     """Human-friendly relative time for a datetime"""
@@ -451,11 +479,11 @@ def get_stats():
             stats['urgent'] += count
     return stats
 
-def render_metric(label, value, color, icon):
+def render_metric(label, value, color):
     st.markdown(
         f"""
         <div class="metric-card">
-            <div class="metric-icon" style="background:{color}1a;color:{color}">{icon}</div>
+            <div class="metric-accent" style="background:{color}"></div>
             <div class="metric-body">
                 <div class="metric-value">{value}</div>
                 <div class="metric-label">{label}</div>
@@ -467,228 +495,259 @@ def render_metric(label, value, color, icon):
 
 APP_CSS = """
 <style>
+/* ---------- Atlassian design tokens ---------- */
 :root {
-    --accent: #6b5bff;
-    --accent-dark: #5748e0;
-    --accent-soft: #eeecff;
-    --bg: #f4f5fb;
-    --card: #ffffff;
-    --border: #e4e6f1;
-    --text: #1c2033;
-    --muted: #6a708c;
-    --shadow: 0 1px 2px rgba(28, 32, 51, 0.05), 0 4px 14px rgba(28, 32, 51, 0.06);
+    --n0: #ffffff;
+    --n10: #fafbfc;
+    --n20: #f4f5f7;
+    --n30: #ebecf0;
+    --n40: #dfe1e6;
+    --n400: #6b778c;
+    --n500: #42526e;
+    --n700: #253858;
+    --n800: #172b4d;
+    --b400: #0052cc;
+    --b500: #0747a6;
+    --b75: #deebff;
+    --b50: #eaf2ff;
+    --r300: #de350b;
+    --r75: #ffebe6;
+    --g300: #36b37e;
+    --g75: #e3fcef;
+    --y300: #ffab00;
+    --card-shadow: 0 1px 1px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
+    --card-shadow-hover: 0 4px 8px -2px rgba(9, 30, 66, 0.25), 0 0 1px rgba(9, 30, 66, 0.31);
 }
 
-/* ---------- App shell ---------- */
-.stApp { background: var(--bg); }
+.stApp { background: var(--n0); }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stToolbar"] { display: none; }
 #MainMenu { display: none; }
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Noto Sans',
+                 'Ubuntu', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    color: var(--n800);
+}
 
+/* ---------- Sidebar (Jira left nav) ---------- */
 section[data-testid="stSidebar"] {
-    background: #ffffff;
-    border-right: 1px solid var(--border);
+    background: var(--n10);
+    border-right: 1px solid var(--n40);
 }
-section[data-testid="stSidebar"] .stButton > button {
-    width: 100%;
-    border-radius: 10px;
-    font-weight: 600;
-}
+section[data-testid="stSidebar"] .stButton > button { width: 100%; }
 
-/* ---------- Typography ---------- */
-h1, h2, h3, h4 { color: var(--text); letter-spacing: -0.01em; }
-
-/* ---------- Header ---------- */
-.app-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 22px 6px 18px 6px;
-    margin-bottom: 8px;
-}
-.app-header-left { display: flex; align-items: center; gap: 14px; }
-.app-logo {
-    width: 46px; height: 46px;
+.sb-project { display: flex; align-items: center; gap: 10px; padding: 6px 2px 14px 2px; }
+.sb-project-avatar {
+    width: 32px; height: 32px;
     display: flex; align-items: center; justify-content: center;
-    font-size: 24px;
-    background: linear-gradient(135deg, #6b5bff, #8b5cf6);
+    background: var(--b400); color: #fff;
+    font-size: 16px; font-weight: 700;
+    border-radius: 3px;
+}
+.sb-project-name { font-size: 14px; font-weight: 600; color: var(--n800); line-height: 1.2; }
+.sb-project-sub { font-size: 12px; color: var(--n400); }
+.sb-section {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--n400);
+    margin: 16px 2px 6px 2px;
+}
+
+/* ---------- Topbar (Jira nav) ---------- */
+.topbar {
+    display: flex; align-items: center; gap: 12px;
+    margin: 0 0 18px 0;
+    padding: 10px 16px;
+    background: var(--b500);
     color: #fff;
-    border-radius: 12px;
-    box-shadow: var(--shadow);
+    border-radius: 3px;
+    box-shadow: var(--card-shadow);
 }
-.app-title { font-size: 24px; font-weight: 700; color: var(--text); line-height: 1.1; }
-.app-subtitle { font-size: 13px; color: var(--muted); margin-top: 2px; }
-.app-header-right { display: flex; align-items: center; gap: 10px; }
-.app-header-right .stButton > button {
-    border-radius: 10px;
-    font-weight: 600;
-    padding: 0.45rem 1.1rem;
+.topbar-logo {
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 3px;
+    font-size: 15px;
 }
+.topbar-title { font-size: 16px; font-weight: 600; letter-spacing: 0.01em; }
+.topbar-tag { font-size: 13px; color: rgba(255, 255, 255, 0.75); margin-left: 6px; }
 
 /* ---------- Metrics ---------- */
 .metric-card {
-    flex: 1;
-    display: flex; align-items: center; gap: 12px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 14px 16px;
-    box-shadow: var(--shadow);
+    display: flex; align-items: stretch; gap: 12px;
+    background: var(--n0);
+    border-radius: 3px;
+    box-shadow: var(--card-shadow);
+    overflow: hidden;
+    padding: 0;
+    margin-bottom: 2px;
 }
-.metric-icon {
-    width: 40px; height: 40px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 19px;
-    border-radius: 10px;
+.metric-accent { width: 4px; flex-shrink: 0; }
+.metric-body { padding: 12px 14px; }
+.metric-value { font-size: 22px; font-weight: 600; color: var(--n800); line-height: 1.1; }
+.metric-label {
+    font-size: 11px; font-weight: 600;
+    color: var(--n400);
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin-top: 2px;
 }
-.metric-value { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.1; }
-.metric-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
 
-/* ---------- Board columns ---------- */
+/* ---------- Board columns (Jira) ---------- */
 .board-column-header {
-    display: flex; align-items: center; gap: 8px;
-    padding: 4px 6px 12px 6px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px 10px 8px;
 }
-.status-dot { width: 9px; height: 9px; border-radius: 50%; }
-.col-title { font-size: 15px; font-weight: 700; color: var(--text); }
-.col-count {
-    margin-left: auto;
-    background: #eef0f7;
-    color: var(--muted);
+.col-title {
     font-size: 12px; font-weight: 600;
-    padding: 2px 9px;
-    border-radius: 999px;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--n400);
+}
+.col-count {
+    font-size: 12px; font-weight: 600;
+    color: var(--n400);
+    background: var(--n30);
+    border-radius: 3px;
+    padding: 1px 7px;
+    margin-left: auto;
 }
 .st-key-col_open,
 .st-key-col_in_progress,
 .st-key-col_resolved {
-    background: transparent;
-    border: 1px solid var(--border) !important;
-    border-radius: 14px !important;
-    box-shadow: var(--shadow);
+    background: var(--n20);
+    border: none !important;
+    border-radius: 3px !important;
+    box-shadow: none !important;
+}
+.st-key-col_open [data-testid="stVerticalBlockBorderWrapper"],
+.st-key-col_in_progress [data-testid="stVerticalBlockBorderWrapper"],
+.st-key-col_resolved [data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--n20);
+    border: none;
+    border-radius: 3px;
 }
 
-/* ---------- Ticket cards ---------- */
+/* ---------- Ticket cards (Jira issue cards) ---------- */
 .ticket-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 12px 14px;
+    background: var(--n0);
+    border-radius: 3px;
+    box-shadow: var(--card-shadow);
+    padding: 10px 12px 8px 12px;
     margin: 6px 0;
-    transition: box-shadow 0.15s ease, transform 0.15s ease;
+    cursor: pointer;
+    transition: box-shadow 0.1s ease;
 }
-.ticket-card:hover {
-    box-shadow: 0 6px 18px rgba(28, 32, 51, 0.10);
-    transform: translateY(-1px);
+.ticket-card:hover { box-shadow: var(--card-shadow-hover); background: var(--n10); }
+.ticket-title {
+    font-size: 14px; font-weight: 500; color: var(--n800);
+    line-height: 1.4;
+    margin-bottom: 10px;
 }
-.ticket-card-top {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
-    margin-bottom: 8px;
-}
-.ticket-title { font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.35; }
-.priority-badge {
-    flex-shrink: 0;
-    font-size: 10px; font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 3px 8px;
-    border-radius: 999px;
-    white-space: nowrap;
+.ticket-card-bottom {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
 .ticket-card-meta {
-    display: flex; flex-wrap: wrap; gap: 10px;
-    font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: var(--n400);
+}
+.loz {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600;
+    letter-spacing: 0.03em; text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.avatar {
+    width: 24px; height: 24px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    color: #fff;
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase;
 }
 .ticket-card .stButton > button {
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    background: #f4f5fb;
-    border: 1px solid var(--border);
-    color: var(--text);
+    background: transparent;
+    border: none;
+    color: var(--n400);
+    font-size: 12px; font-weight: 500;
+    border-radius: 3px;
+    padding: 2px 8px;
+    width: auto;
 }
 .ticket-card .stButton > button:hover {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--accent-dark);
+    background: var(--b50);
+    color: var(--b400);
 }
 
 /* ---------- Widgets ---------- */
-.stButton > button { border-radius: 10px; font-weight: 600; }
+.stButton > button {
+    border-radius: 3px;
+    font-weight: 500;
+    border: none;
+    background: var(--n20);
+    color: var(--n800);
+}
+.stButton > button:hover { background: var(--n30); }
+.stButton > button[kind="primary"] {
+    background: var(--b400) !important;
+    color: #fff !important;
+}
+.stButton > button[kind="primary"]:hover { background: var(--b500) !important; }
 .stTextInput > div > div > input, .stTextArea textarea {
-    border-radius: 10px;
-    border: 1px solid var(--border);
+    border-radius: 3px;
+    border: 2px solid var(--n40);
 }
-.stSelectbox > div > div { border-radius: 10px; border: 1px solid var(--border); }
+.stTextInput > div > div > input:focus, .stTextArea textarea:focus {
+    border-color: var(--b400);
+    box-shadow: none;
+}
+.stSelectbox > div > div { border-radius: 3px; border: 2px solid var(--n40); }
 .stExpander {
-    border: 1px solid var(--border) !important;
-    border-radius: 12px !important;
-    background: var(--card);
+    border: none !important;
+    border-radius: 3px !important;
+    background: var(--n20);
 }
 
-/* ---------- Dialog ---------- */
+/* ---------- Dialog (Jira issue view) ---------- */
 [data-testid="stDialog"] {
-    border-radius: 18px;
-    box-shadow: 0 20px 60px rgba(28, 32, 51, 0.25);
-    border: 1px solid var(--border);
+    border-radius: 3px;
+    box-shadow: 0 8px 16px -4px rgba(9, 30, 66, 0.31), 0 0 1px rgba(9, 30, 66, 0.31);
+    border: none;
 }
-[data-testid="stDialog"] [data-testid="stVerticalBlock"] { padding: 6px; }
-
 .dialog-head {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 2px 2px 14px 2px;
-    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--n40);
     margin-bottom: 14px;
 }
-.dialog-title { font-size: 19px; font-weight: 700; color: var(--text); }
+.dialog-title { font-size: 18px; font-weight: 600; color: var(--n800); }
 .dialog-badges { display: flex; gap: 8px; margin-left: auto; }
-.status-badge {
-    font-size: 11px; font-weight: 700;
-    letter-spacing: 0.04em; text-transform: capitalize;
-    padding: 4px 11px;
-    border-radius: 999px;
-}
-.dialog-meta { width: 100%; font-size: 13px; color: var(--muted); }
+.dialog-meta { width: 100%; font-size: 13px; color: var(--n400); }
 
-/* ---------- Message bubbles ---------- */
-.msg-row { display: flex; gap: 10px; margin: 10px 0; }
-.msg-row.msg-mine { flex-direction: row-reverse; }
-.msg-avatar {
-    width: 34px; height: 34px; flex-shrink: 0;
+/* ---------- Comments (Jira style) ---------- */
+.comment { display: flex; gap: 10px; margin: 14px 0; }
+.comment-avatar {
+    width: 32px; height: 32px; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent-dark);
-    font-size: 14px; font-weight: 700;
+    color: #fff;
+    font-size: 13px; font-weight: 700;
+    text-transform: uppercase;
 }
-.msg-bubble {
-    max-width: 75%;
-    background: #f2f3f9;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    border-top-left-radius: 4px;
-    padding: 9px 13px;
-}
-.msg-row.msg-mine .msg-bubble {
-    background: var(--accent-soft);
-    border-color: #dcd8ff;
-    border-radius: 14px;
-    border-top-right-radius: 4px;
-}
-.msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
-.msg-author { font-size: 12px; font-weight: 700; color: var(--text); }
-.msg-time { font-size: 11px; color: var(--muted); }
-.msg-text { font-size: 14px; color: var(--text); line-height: 1.45; word-wrap: break-word; }
-.msg-empty { color: var(--muted); font-size: 14px; }
+.comment-body { flex: 1; min-width: 0; }
+.comment-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.comment-author { font-size: 14px; font-weight: 600; color: var(--n800); }
+.comment-you { font-size: 11px; color: var(--b400); font-weight: 500; }
+.comment-time { font-size: 12px; color: var(--n400); }
+.comment-text { font-size: 14px; color: var(--n800); line-height: 1.5; word-wrap: break-word; }
+.msg-empty { color: var(--n400); font-size: 14px; }
 
 /* ---------- Danger zone ---------- */
 .danger-btn .stButton > button {
-    color: #dc2626 !important;
-    border-color: #fecaca !important;
-    background: #fef2f2 !important;
+    color: var(--r300) !important;
+    background: var(--r75) !important;
 }
-.danger-btn .stButton > button:hover { background: #fee2e2 !important; }
+.danger-btn .stButton > button:hover { background: #ffbdad !important; }
 </style>
 """
 
@@ -696,19 +755,23 @@ def render_ticket_card(ticket):
     """Render a ticket card"""
     priority = ticket['priority']
     r, g, b = PRIORITY_COLORS.get(priority, PRIORITY_COLORS['medium'])
-    author = (ticket['created_by'] or 'unknown').split('@')[0]
+    author = ticket['created_by'] or 'unknown'
+    author_short = author.split('@')[0]
     st.markdown(
         f"""
         <div class="ticket-card">
-            <div class="ticket-card-top">
-                <div class="ticket-title">{html.escape(ticket['title'])}</div>
-                <span class="priority-badge" style="color:rgb({r},{g},{b});background:rgba({r},{g},{b},0.12)">{html.escape(priority)}</span>
-            </div>
-            <div class="ticket-card-meta">
-                <span>#{ticket['ticket_id']}</span>
-                <span>💬 {ticket['message_count']}</span>
-                <span>👤 {html.escape(author)}</span>
-                <span>🕒 {time_ago(ticket['created_at'])}</span>
+            <div class="ticket-title">{html.escape(ticket['title'])}</div>
+            <div class="ticket-card-bottom">
+                <div class="ticket-card-meta">
+                    <span>#{ticket['ticket_id']}</span>
+                    <span class="loz" style="color:rgb({r},{g},{b});background:rgba({r},{g},{b},0.14)">
+                        {PRIORITY_ICONS.get(priority, '')} {html.escape(priority)}
+                    </span>
+                    <span title="{ticket['message_count']} messages">💬 {ticket['message_count']}</span>
+                </div>
+                <div class="avatar" style="background:{avatar_color(author)}" title="{html.escape(author)}">
+                    {html.escape(author_short[0].upper())}
+                </div>
             </div>
         </div>
         """,
@@ -721,18 +784,20 @@ def render_ticket_card(ticket):
 def render_message(msg, current_user):
     author = (msg['author'] or 'anonymous')
     mine = author == current_user
-    avatar = html.escape(author[0].upper())
-    cls = 'msg-mine' if mine else ''
+    you_badge = '<span class="comment-you">· You</span>' if mine else ''
     st.markdown(
         f"""
-        <div class="msg-row {cls}">
-            <div class="msg-avatar">{avatar}</div>
-            <div class="msg-bubble">
-                <div class="msg-head">
-                    <span class="msg-author">{html.escape(author)}</span>
-                    <span class="msg-time">{time_ago(msg['created_at'])}</span>
+        <div class="comment">
+            <div class="comment-avatar" style="background:{avatar_color(author)}">
+                {html.escape(author[0].upper())}
+            </div>
+            <div class="comment-body">
+                <div class="comment-head">
+                    <span class="comment-author">{html.escape(author)}</span>
+                    {you_badge}
+                    <span class="comment-time">{time_ago(msg['created_at'])}</span>
                 </div>
-                <div class="msg-text">{html.escape(msg['message_text'])}</div>
+                <div class="comment-text">{html.escape(msg['message_text'])}</div>
             </div>
         </div>
         """,
@@ -778,17 +843,17 @@ def show_ticket_modal():
     # Show modal
     @st.dialog(f"Ticket #{ticket['ticket_id']}", width="large")
     def ticket_dialog():
-        status_color = STATUS_META.get(ticket['status'], {}).get('color', '#6b5bff')
+        status_meta = STATUS_META.get(ticket['status'], STATUS_META['open'])
         pr, pg, pb = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
         st.markdown(
             f"""
             <div class="dialog-head">
-                <div class="dialog-title">Ticket #{ticket['ticket_id']}</div>
+                <div class="dialog-title">{html.escape(ticket['title'])}</div>
                 <div class="dialog-badges">
-                    <span class="status-badge" style="color:{status_color};background:{status_color}1a">{html.escape(ticket['status'].replace('_', ' '))}</span>
-                    <span class="priority-badge" style="color:rgb({pr},{pg},{pb});background:rgba({pr},{pg},{pb},0.12)">{html.escape(ticket['priority'])}</span>
+                    <span class="loz" style="color:{status_meta['color']};background:{status_meta['tint']}">{html.escape(ticket['status'].replace('_', ' '))}</span>
+                    <span class="loz" style="color:rgb({pr},{pg},{pb});background:rgba({pr},{pg},{pb},0.14)">{PRIORITY_ICONS.get(ticket['priority'], '')} {html.escape(ticket['priority'])}</span>
                 </div>
-                <div class="dialog-meta">{html.escape(ticket['title'])} · created by {html.escape(ticket['created_by'] or 'unknown')} · {ticket['created_at'].strftime('%b %d, %Y %H:%M') if ticket['created_at'] else ''}</div>
+                <div class="dialog-meta">Ticket #{ticket['ticket_id']} · created by {html.escape(ticket['created_by'] or 'unknown')} · {ticket['created_at'].strftime('%b %d, %Y %H:%M') if ticket['created_at'] else ''}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -820,19 +885,19 @@ def show_ticket_modal():
         st.divider()
 
         # Messages
-        st.markdown("##### Conversation")
+        st.markdown('<div class="sb-section" style="margin:0 0 8px 0">Comments</div>', unsafe_allow_html=True)
         messages = get_ticket_messages(ticket_id)
 
         if messages:
             for msg in messages:
                 render_message(msg, current_user)
         else:
-            st.markdown('<div class="msg-empty">No messages yet — start the conversation.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="msg-empty">No comments yet — start the conversation.</div>', unsafe_allow_html=True)
 
         st.divider()
 
         # Add new message
-        st.markdown("##### Add Message")
+        st.markdown('<div class="sb-section" style="margin:0 0 8px 0">Add Comment</div>', unsafe_allow_html=True)
         new_message = st.text_area("Message", key=f"new_message_{ticket_id}", placeholder="Write a reply…")
         if st.button("Send Message", key=f"send_{ticket_id}", type="primary", disabled=not new_message.strip()):
             if add_message(ticket_id, new_message):
@@ -869,22 +934,35 @@ st.markdown(APP_CSS, unsafe_allow_html=True)
 
 # Sidebar
 with st.sidebar:
-    st.markdown('<div class="app-title" style="font-size:18px">🎫 Ticketing System</div>', unsafe_allow_html=True)
-    st.caption("Support queue · Databricks bootcamp")
-    st.divider()
+    st.markdown(
+        """
+        <div class="sb-project">
+            <div class="sb-project-avatar">🎫</div>
+            <div>
+                <div class="sb-project-name">Ticketing System</div>
+                <div class="sb-project-sub">Support queue</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+    st.markdown('<div class="sb-section">Board</div>', unsafe_allow_html=True)
     if st.button("+ New Ticket", key="new_ticket_btn", type="primary", use_container_width=True):
         st.session_state.selected_ticket = None
         st.session_state.show_new_ticket = True
 
-    st.markdown("#### Filters")
+    st.markdown('<div class="sb-section">Filters</div>', unsafe_allow_html=True)
     filter_priority = st.selectbox(
         "Priority",
         options=["All"] + VALID_PRIORITIES,
         index=0,
         key="filter_priority",
+        label_visibility="collapsed",
+        placeholder="All priorities",
     )
-    filter_search = st.text_input("Search", key="filter_search", placeholder="Search by title…")
+    filter_search = st.text_input("Search", key="filter_search", placeholder="Search by title…",
+                                  label_visibility="collapsed")
 
 priority_filter = None if filter_priority == "All" else filter_priority
 search_filter = filter_search.strip() or None
@@ -915,17 +993,13 @@ if st.session_state.get('show_new_ticket') and not st.session_state.get('selecte
                 st.rerun()
     new_ticket_dialog()
 
-# Header
+# Topbar (Jira-style nav)
 st.markdown(
     """
-    <div class="app-header">
-        <div class="app-header-left">
-            <div class="app-logo">🎫</div>
-            <div>
-                <div class="app-title">Ticketing System</div>
-                <div class="app-subtitle">Support queue · drag tickets between columns to change status</div>
-            </div>
-        </div>
+    <div class="topbar">
+        <div class="topbar-logo">🎫</div>
+        <div class="topbar-title">Ticketing System</div>
+        <div class="topbar-tag">Support board · drag tickets between columns to change status</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -935,15 +1009,15 @@ st.markdown(
 stats = get_stats()
 metric_cols = st.columns(4)
 with metric_cols[0]:
-    render_metric("Open", stats['open'], STATUS_META['open']['color'], STATUS_META['open']['icon'])
+    render_metric("Open", stats['open'], STATUS_META['open']['color'])
 with metric_cols[1]:
-    render_metric("In Progress", stats['in_progress'], STATUS_META['in_progress']['color'], STATUS_META['in_progress']['icon'])
+    render_metric("In Progress", stats['in_progress'], STATUS_META['in_progress']['color'])
 with metric_cols[2]:
-    render_metric("Resolved", stats['resolved'], STATUS_META['resolved']['color'], STATUS_META['resolved']['icon'])
+    render_metric("Resolved", stats['resolved'], STATUS_META['resolved']['color'])
 with metric_cols[3]:
-    render_metric("Urgent", stats['urgent'], '#f44336', '🚨')
+    render_metric("Urgent", stats['urgent'], '#de350b')
 
-st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
 # Kanban board (drag & drop)
 open_tickets = get_tickets_by_status('open', priority=priority_filter, search=search_filter)
@@ -956,12 +1030,11 @@ COLUMN_STATUS = {
     "col_resolved": "resolved",
 }
 
-def render_column(key, label, tickets, color, icon):
+def render_column(key, label, tickets):
     st.markdown(
         f"""
         <div class="board-column-header">
-            <span class="status-dot" style="background:{color}"></span>
-            <span class="col-title">{icon} {label}</span>
+            <span class="col-title">{label}</span>
             <span class="col-count">{len(tickets)}</span>
         </div>
         """,
@@ -974,14 +1047,11 @@ def render_column(key, label, tickets, color, icon):
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    render_column("col_open", STATUS_META['open']['label'], open_tickets,
-                  STATUS_META['open']['color'], STATUS_META['open']['icon'])
+    render_column("col_open", STATUS_META['open']['label'], open_tickets)
 with col2:
-    render_column("col_in_progress", STATUS_META['in_progress']['label'], in_progress_tickets,
-                  STATUS_META['in_progress']['color'], STATUS_META['in_progress']['icon'])
+    render_column("col_in_progress", STATUS_META['in_progress']['label'], in_progress_tickets)
 with col3:
-    render_column("col_resolved", STATUS_META['resolved']['label'], resolved_tickets,
-                  STATUS_META['resolved']['color'], STATUS_META['resolved']['icon'])
+    render_column("col_resolved", STATUS_META['resolved']['label'], resolved_tickets)
 
 event = dnd("col_open", "col_in_progress", "col_resolved",
             handle=True, handle_icon=":material/drag_indicator:", key="kanban_dnd")
