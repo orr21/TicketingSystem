@@ -2,13 +2,14 @@ import streamlit as st
 import psycopg
 import os
 import time
+import html
 from databricks.sdk import WorkspaceClient
-from datetime import datetime
+from datetime import datetime, timezone
 import pandas as pd
 from streamlit_dnd import dnd
 
 # Page configuration
-st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
+st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide", initial_sidebar_state="expanded")
 
 # Initialize Databricks client and connection
 w = WorkspaceClient()
@@ -365,18 +366,338 @@ PRIORITY_COLORS = {
     'low': (76, 175, 80),
 }
 
+STATUS_META = {
+    'open': {'label': 'Open', 'color': '#6b5bff', 'icon': '📋'},
+    'in_progress': {'label': 'In Progress', 'color': '#f59e0b', 'icon': '🔄'},
+    'resolved': {'label': 'Resolved', 'color': '#22c55e', 'icon': '✅'},
+}
+
+def time_ago(dt):
+    """Human-friendly relative time for a datetime"""
+    if dt is None:
+        return ''
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+    if seconds < 60:
+        return 'just now'
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f'{minutes}m ago'
+    hours = int(minutes // 60)
+    if hours < 24:
+        return f'{hours}h ago'
+    days = int(hours // 24)
+    if days < 30:
+        return f'{days}d ago'
+    months = int(days // 30)
+    if months < 12:
+        return f'{months}mo ago'
+    return f'{months // 12}y ago'
+
+def get_stats():
+    """Aggregate ticket counts for the metrics row (unfiltered)"""
+    conn = get_db_connection()
+    if not conn:
+        return {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0, 'urgent': 0}
+    with conn.cursor() as cur:
+        cur.execute("SELECT status, priority, COUNT(*) FROM tickets GROUP BY status, priority")
+        rows = cur.fetchall()
+    stats = {'total': 0, 'open': 0, 'in_progress': 0, 'resolved': 0, 'urgent': 0}
+    for status, priority, count in rows:
+        stats['total'] += count
+        if status in stats:
+            stats[status] += count
+        if priority == 'urgent':
+            stats['urgent'] += count
+    return stats
+
+def render_metric(label, value, color, icon):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-icon" style="background:{color}1a;color:{color}">{icon}</div>
+            <div class="metric-body">
+                <div class="metric-value">{value}</div>
+                <div class="metric-label">{label}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+APP_CSS = """
+<style>
+:root {
+    --accent: #6b5bff;
+    --accent-dark: #5748e0;
+    --accent-soft: #eeecff;
+    --bg: #f4f5fb;
+    --card: #ffffff;
+    --border: #e4e6f1;
+    --text: #1c2033;
+    --muted: #6a708c;
+    --shadow: 0 1px 2px rgba(28, 32, 51, 0.05), 0 4px 14px rgba(28, 32, 51, 0.06);
+}
+
+/* ---------- App shell ---------- */
+.stApp { background: var(--bg); }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stToolbar"] { display: none; }
+#MainMenu { display: none; }
+
+section[data-testid="stSidebar"] {
+    background: #ffffff;
+    border-right: 1px solid var(--border);
+}
+section[data-testid="stSidebar"] .stButton > button {
+    width: 100%;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+/* ---------- Typography ---------- */
+h1, h2, h3, h4 { color: var(--text); letter-spacing: -0.01em; }
+
+/* ---------- Header ---------- */
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 22px 6px 18px 6px;
+    margin-bottom: 8px;
+}
+.app-header-left { display: flex; align-items: center; gap: 14px; }
+.app-logo {
+    width: 46px; height: 46px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px;
+    background: linear-gradient(135deg, #6b5bff, #8b5cf6);
+    color: #fff;
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+}
+.app-title { font-size: 24px; font-weight: 700; color: var(--text); line-height: 1.1; }
+.app-subtitle { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.app-header-right { display: flex; align-items: center; gap: 10px; }
+.app-header-right .stButton > button {
+    border-radius: 10px;
+    font-weight: 600;
+    padding: 0.45rem 1.1rem;
+}
+
+/* ---------- Metrics ---------- */
+.metric-card {
+    flex: 1;
+    display: flex; align-items: center; gap: 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+}
+.metric-icon {
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 19px;
+    border-radius: 10px;
+}
+.metric-value { font-size: 22px; font-weight: 700; color: var(--text); line-height: 1.1; }
+.metric-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* ---------- Board columns ---------- */
+.board-column-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 6px 12px 6px;
+}
+.status-dot { width: 9px; height: 9px; border-radius: 50%; }
+.col-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.col-count {
+    margin-left: auto;
+    background: #eef0f7;
+    color: var(--muted);
+    font-size: 12px; font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+}
+.st-key-col_open,
+.st-key-col_in_progress,
+.st-key-col_resolved {
+    background: transparent;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    box-shadow: var(--shadow);
+}
+
+/* ---------- Ticket cards ---------- */
+.ticket-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 6px 0;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.ticket-card:hover {
+    box-shadow: 0 6px 18px rgba(28, 32, 51, 0.10);
+    transform: translateY(-1px);
+}
+.ticket-card-top {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    margin-bottom: 8px;
+}
+.ticket-title { font-size: 14px; font-weight: 600; color: var(--text); line-height: 1.35; }
+.priority-badge {
+    flex-shrink: 0;
+    font-size: 10px; font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.ticket-card-meta {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    font-size: 12px; color: var(--muted);
+}
+.ticket-card .stButton > button {
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    background: #f4f5fb;
+    border: 1px solid var(--border);
+    color: var(--text);
+}
+.ticket-card .stButton > button:hover {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-dark);
+}
+
+/* ---------- Widgets ---------- */
+.stButton > button { border-radius: 10px; font-weight: 600; }
+.stTextInput > div > div > input, .stTextArea textarea {
+    border-radius: 10px;
+    border: 1px solid var(--border);
+}
+.stSelectbox > div > div { border-radius: 10px; border: 1px solid var(--border); }
+.stExpander {
+    border: 1px solid var(--border) !important;
+    border-radius: 12px !important;
+    background: var(--card);
+}
+
+/* ---------- Dialog ---------- */
+[data-testid="stDialog"] {
+    border-radius: 18px;
+    box-shadow: 0 20px 60px rgba(28, 32, 51, 0.25);
+    border: 1px solid var(--border);
+}
+[data-testid="stDialog"] [data-testid="stVerticalBlock"] { padding: 6px; }
+
+.dialog-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 2px 2px 14px 2px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 14px;
+}
+.dialog-title { font-size: 19px; font-weight: 700; color: var(--text); }
+.dialog-badges { display: flex; gap: 8px; margin-left: auto; }
+.status-badge {
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 0.04em; text-transform: capitalize;
+    padding: 4px 11px;
+    border-radius: 999px;
+}
+.dialog-meta { width: 100%; font-size: 13px; color: var(--muted); }
+
+/* ---------- Message bubbles ---------- */
+.msg-row { display: flex; gap: 10px; margin: 10px 0; }
+.msg-row.msg-mine { flex-direction: row-reverse; }
+.msg-avatar {
+    width: 34px; height: 34px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%;
+    background: var(--accent-soft);
+    color: var(--accent-dark);
+    font-size: 14px; font-weight: 700;
+}
+.msg-bubble {
+    max-width: 75%;
+    background: #f2f3f9;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    border-top-left-radius: 4px;
+    padding: 9px 13px;
+}
+.msg-row.msg-mine .msg-bubble {
+    background: var(--accent-soft);
+    border-color: #dcd8ff;
+    border-radius: 14px;
+    border-top-right-radius: 4px;
+}
+.msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.msg-author { font-size: 12px; font-weight: 700; color: var(--text); }
+.msg-time { font-size: 11px; color: var(--muted); }
+.msg-text { font-size: 14px; color: var(--text); line-height: 1.45; word-wrap: break-word; }
+.msg-empty { color: var(--muted); font-size: 14px; }
+
+/* ---------- Danger zone ---------- */
+.danger-btn .stButton > button {
+    color: #dc2626 !important;
+    border-color: #fecaca !important;
+    background: #fef2f2 !important;
+}
+.danger-btn .stButton > button:hover { background: #fee2e2 !important; }
+</style>
+"""
+
 def render_ticket_card(ticket):
     """Render a ticket card"""
-    r, g, b = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
-    st.markdown(f"**{ticket['title']}**")
-    st.caption(f"#{ticket['ticket_id']} • {ticket['message_count']} messages")
+    priority = ticket['priority']
+    r, g, b = PRIORITY_COLORS.get(priority, PRIORITY_COLORS['medium'])
+    author = (ticket['created_by'] or 'unknown').split('@')[0]
     st.markdown(
-        f"<small>Priority: <strong style='color: rgb({r}, {g}, {b})'>{ticket['priority']}</strong>"
-        f" · {ticket['created_by']}</small>",
+        f"""
+        <div class="ticket-card">
+            <div class="ticket-card-top">
+                <div class="ticket-title">{html.escape(ticket['title'])}</div>
+                <span class="priority-badge" style="color:rgb({r},{g},{b});background:rgba({r},{g},{b},0.12)">{html.escape(priority)}</span>
+            </div>
+            <div class="ticket-card-meta">
+                <span>#{ticket['ticket_id']}</span>
+                <span>💬 {ticket['message_count']}</span>
+                <span>👤 {html.escape(author)}</span>
+                <span>🕒 {time_ago(ticket['created_at'])}</span>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
     if st.button("View Details", key=f"view_{ticket['ticket_id']}", use_container_width=True):
         st.session_state.selected_ticket = ticket['ticket_id']
+
+def render_message(msg, current_user):
+    author = (msg['author'] or 'anonymous')
+    mine = author == current_user
+    avatar = html.escape(author[0].upper())
+    cls = 'msg-mine' if mine else ''
+    st.markdown(
+        f"""
+        <div class="msg-row {cls}">
+            <div class="msg-avatar">{avatar}</div>
+            <div class="msg-bubble">
+                <div class="msg-head">
+                    <span class="msg-author">{html.escape(author)}</span>
+                    <span class="msg-time">{time_ago(msg['created_at'])}</span>
+                </div>
+                <div class="msg-text">{html.escape(msg['message_text'])}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def show_ticket_modal():
     """Show ticket details modal"""
@@ -411,82 +732,84 @@ def show_ticket_modal():
             'created_at': row[5]
         }
     
+    try:
+        current_user = w.current_user.me().user_name
+    except Exception:
+        current_user = None
+
     # Show modal
-    @st.dialog(f"Ticket #{ticket['ticket_id']}: {ticket['title']}", width="large")
+    @st.dialog(f"Ticket #{ticket['ticket_id']}", width="large")
     def ticket_dialog():
-        # Ticket info
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"**Created by:** {ticket['created_by']}")
-            st.write(f"**Created at:** {ticket['created_at'].strftime('%Y-%m-%d %H:%M')}")
-        
-        with col2:
-            # Status selector
+        status_color = STATUS_META.get(ticket['status'], {}).get('color', '#6b5bff')
+        pr, pg, pb = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
+        st.markdown(
+            f"""
+            <div class="dialog-head">
+                <div class="dialog-title">Ticket #{ticket['ticket_id']}</div>
+                <div class="dialog-badges">
+                    <span class="status-badge" style="color:{status_color};background:{status_color}1a">{html.escape(ticket['status'].replace('_', ' '))}</span>
+                    <span class="priority-badge" style="color:rgb({pr},{pg},{pb});background:rgba({pr},{pg},{pb},0.12)">{html.escape(ticket['priority'])}</span>
+                </div>
+                <div class="dialog-meta">{html.escape(ticket['title'])} · created by {html.escape(ticket['created_by'] or 'unknown')} · {ticket['created_at'].strftime('%b %d, %Y %H:%M') if ticket['created_at'] else ''}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
             new_status = st.selectbox(
                 "Status",
                 options=VALID_STATUSES,
                 index=VALID_STATUSES.index(ticket['status']),
                 key=f"status_{ticket_id}"
             )
-            
-            if new_status != ticket['status']:
-                if st.button("Update Status", key=f"update_status_{ticket_id}"):
-                    if update_ticket_status(ticket_id, new_status):
-                        st.success("Status updated!")
-                        st.session_state.selected_ticket = None
-                        st.rerun()
-            
-            # Priority selector
+            if st.button("Update Status", key=f"update_status_{ticket_id}", disabled=new_status == ticket['status']):
+                if update_ticket_status(ticket_id, new_status):
+                    st.session_state.selected_ticket = None
+                    st.rerun()
+        with c2:
             new_priority = st.selectbox(
                 "Priority",
                 options=VALID_PRIORITIES,
                 index=VALID_PRIORITIES.index(ticket['priority']),
                 key=f"priority_{ticket_id}"
             )
-            
-            if new_priority != ticket['priority']:
-                if st.button("Update Priority", key=f"update_priority_{ticket_id}"):
-                    if update_ticket_priority(ticket_id, new_priority):
-                        st.success("Priority updated!")
-                        st.rerun()
-        
+            if st.button("Update Priority", key=f"update_priority_{ticket_id}", disabled=new_priority == ticket['priority']):
+                if update_ticket_priority(ticket_id, new_priority):
+                    st.rerun()
+
         st.divider()
-        
+
         # Messages
-        st.subheader("Messages")
+        st.markdown("##### Conversation")
         messages = get_ticket_messages(ticket_id)
-        
+
         if messages:
             for msg in messages:
-                with st.container(border=True):
-                    st.markdown(f"**{msg['author']}** • {msg['created_at'].strftime('%Y-%m-%d %H:%M')}")
-                    st.write(msg['message_text'])
+                render_message(msg, current_user)
         else:
-            st.info("No messages yet")
-        
+            st.markdown('<div class="msg-empty">No messages yet — start the conversation.</div>', unsafe_allow_html=True)
+
         st.divider()
-        
+
         # Add new message
-        st.subheader("Add Message")
-        new_message = st.text_area("Message", key=f"new_message_{ticket_id}")
-        
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            if st.button("Send", key=f"send_{ticket_id}", type="primary", disabled=not new_message):
-                if add_message(ticket_id, new_message):
-                    st.success("Message added!")
-                    st.rerun()
-        
-        with col2:
-            if st.button("Close", key=f"close_{ticket_id}"):
-                st.session_state.selected_ticket = None
+        st.markdown("##### Add Message")
+        new_message = st.text_area("Message", key=f"new_message_{ticket_id}", placeholder="Write a reply…")
+        if st.button("Send Message", key=f"send_{ticket_id}", type="primary", disabled=not new_message.strip()):
+            if add_message(ticket_id, new_message):
                 st.rerun()
-        
+
         st.divider()
-        
-        st.subheader("Danger Zone")
-        if st.button("Delete Ticket", key=f"delete_{ticket_id}", type="secondary"):
+
+        # Danger zone
+        st.markdown(
+            '<div class="danger-btn">',
+            unsafe_allow_html=True,
+        )
+        if st.button("Delete Ticket", key=f"delete_{ticket_id}"):
             st.session_state[f"confirming_delete_{ticket_id}"] = True
+        st.markdown('</div>', unsafe_allow_html=True)
         if st.session_state.get(f"confirming_delete_{ticket_id}"):
             st.warning("Are you sure? This permanently deletes the ticket and all its messages.")
             c1, c2 = st.columns(2)
@@ -495,7 +818,6 @@ def show_ticket_modal():
                     if delete_ticket(ticket_id):
                         st.session_state[f"confirming_delete_{ticket_id}"] = False
                         st.session_state.selected_ticket = None
-                        st.success("Ticket deleted!")
                         st.rerun()
             with c2:
                 if st.button("Cancel", key=f"cancel_delete_{ticket_id}"):
@@ -505,51 +827,86 @@ def show_ticket_modal():
     ticket_dialog()
 
 # Main app
-st.title("🎫 Ticketing System")
+st.markdown(APP_CSS, unsafe_allow_html=True)
 
-# Create new ticket section
-with st.expander("➕ Create New Ticket", expanded=False):
-    new_ticket_title = st.text_input("Ticket Title", key="new_ticket_title")
-    new_ticket_status = st.selectbox(
-        "Initial Status",
-        options=VALID_STATUSES,
-        index=0,
-        key="new_ticket_status"
-    )
-    new_ticket_priority = st.selectbox(
-        "Priority",
-        options=VALID_PRIORITIES,
-        index=1,
-        key="new_ticket_priority"
-    )
-    
-    if st.button("Create Ticket", key="create_ticket", type="primary", disabled=not new_ticket_title):
-        ticket_id = create_ticket(new_ticket_title, new_ticket_status, new_ticket_priority)
-        if ticket_id:
-            st.success(f"Ticket #{ticket_id} created successfully!")
-            st.rerun()
+# Sidebar
+with st.sidebar:
+    st.markdown('<div class="app-title" style="font-size:18px">🎫 Ticketing System</div>', unsafe_allow_html=True)
+    st.caption("Support queue · Databricks bootcamp")
+    st.divider()
 
-st.divider()
+    if st.button("+ New Ticket", key="new_ticket_btn", type="primary", use_container_width=True):
+        st.session_state.show_new_ticket = True
 
-# Kanban board (drag & drop)
-st.subheader("Ticket Board")
-
-# Filters
-fcol1, fcol2 = st.columns([1, 3])
-with fcol1:
+    st.markdown("#### Filters")
     filter_priority = st.selectbox(
-        "Filter by Priority",
+        "Priority",
         options=["All"] + VALID_PRIORITIES,
         index=0,
         key="filter_priority",
     )
-with fcol2:
-    filter_search = st.text_input("Search by Title", key="filter_search")
+    filter_search = st.text_input("Search", key="filter_search", placeholder="Search by title…")
 
 priority_filter = None if filter_priority == "All" else filter_priority
 search_filter = filter_search.strip() or None
 
-# Fetch tickets for each status
+# New ticket dialog
+if st.session_state.get('show_new_ticket'):
+    @st.dialog("Create New Ticket", width="small")
+    def new_ticket_dialog():
+        new_ticket_title = st.text_input("Ticket Title", key="new_ticket_title")
+        new_ticket_status = st.selectbox(
+            "Initial Status",
+            options=VALID_STATUSES,
+            index=0,
+            key="new_ticket_status"
+        )
+        new_ticket_priority = st.selectbox(
+            "Priority",
+            options=VALID_PRIORITIES,
+            index=1,
+            key="new_ticket_priority"
+        )
+
+        if st.button("Create Ticket", key="create_ticket", type="primary",
+                     use_container_width=True, disabled=not new_ticket_title.strip()):
+            ticket_id = create_ticket(new_ticket_title, new_ticket_status, new_ticket_priority)
+            if ticket_id:
+                st.session_state.show_new_ticket = False
+                st.rerun()
+    new_ticket_dialog()
+
+# Header
+st.markdown(
+    """
+    <div class="app-header">
+        <div class="app-header-left">
+            <div class="app-logo">🎫</div>
+            <div>
+                <div class="app-title">Ticketing System</div>
+                <div class="app-subtitle">Support queue · drag tickets between columns to change status</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Metrics row
+stats = get_stats()
+metric_cols = st.columns(4)
+with metric_cols[0]:
+    render_metric("Open", stats['open'], STATUS_META['open']['color'], STATUS_META['open']['icon'])
+with metric_cols[1]:
+    render_metric("In Progress", stats['in_progress'], STATUS_META['in_progress']['color'], STATUS_META['in_progress']['icon'])
+with metric_cols[2]:
+    render_metric("Resolved", stats['resolved'], STATUS_META['resolved']['color'], STATUS_META['resolved']['icon'])
+with metric_cols[3]:
+    render_metric("Urgent", stats['urgent'], '#f44336', '🚨')
+
+st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
+
+# Kanban board (drag & drop)
 open_tickets = get_tickets_by_status('open', priority=priority_filter, search=search_filter)
 in_progress_tickets = get_tickets_by_status('in_progress', priority=priority_filter, search=search_filter)
 resolved_tickets = get_tickets_by_status('resolved', priority=priority_filter, search=search_filter)
@@ -560,32 +917,32 @@ COLUMN_STATUS = {
     "col_resolved": "resolved",
 }
 
-def render_column(key, label, tickets):
-    st.markdown(f"### {label}")
-    st.caption(f"{len(tickets)} tickets")
+def render_column(key, label, tickets, color, icon):
+    st.markdown(
+        f"""
+        <div class="board-column-header">
+            <span class="status-dot" style="background:{color}"></span>
+            <span class="col-title">{icon} {label}</span>
+            <span class="col-count">{len(tickets)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     with st.container(key=key, border=True):
         for ticket in tickets:
             with st.container(key=f"ticket_{ticket['ticket_id']}", border=True):
                 render_ticket_card(ticket)
-    if tickets:
-        styles = []
-        for ticket in tickets:
-            r, g, b = PRIORITY_COLORS.get(ticket['priority'], PRIORITY_COLORS['medium'])
-            styles.append(
-                f"div.st-key-ticket_{ticket['ticket_id']} [data-testid='stVerticalBlock'] {{"
-                f"background-color: rgba({r}, {g}, {b}, 0.12) !important;"
-                f"border-radius: 8px;"
-                f"}}"
-            )
-        st.markdown(f"<style>{''.join(styles)}</style>", unsafe_allow_html=True)
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    render_column("col_open", "📋 Open", open_tickets)
+    render_column("col_open", STATUS_META['open']['label'], open_tickets,
+                  STATUS_META['open']['color'], STATUS_META['open']['icon'])
 with col2:
-    render_column("col_in_progress", "🔄 In Progress", in_progress_tickets)
+    render_column("col_in_progress", STATUS_META['in_progress']['label'], in_progress_tickets,
+                  STATUS_META['in_progress']['color'], STATUS_META['in_progress']['icon'])
 with col3:
-    render_column("col_resolved", "✅ Resolved", resolved_tickets)
+    render_column("col_resolved", STATUS_META['resolved']['label'], resolved_tickets,
+                  STATUS_META['resolved']['color'], STATUS_META['resolved']['icon'])
 
 event = dnd("col_open", "col_in_progress", "col_resolved",
             handle=True, handle_icon=":material/drag_indicator:", key="kanban_dnd")
