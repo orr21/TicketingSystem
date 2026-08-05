@@ -164,20 +164,29 @@ def get_db_connection():
 
     return st.session_state.conn
 
-def get_tickets_by_status(status):
-    """Fetch tickets by status"""
+def get_tickets_by_status(status, priority=None, search=None):
+    """Fetch tickets by status, optionally filtered by priority and title search"""
     conn = get_db_connection()
     if not conn:
         return []
     
+    conditions = ["status = %s"]
+    params = [status]
+    if priority:
+        conditions.append("priority = %s")
+        params.append(priority)
+    if search:
+        conditions.append("title ILIKE %s")
+        params.append(f"%{search}%")
+    
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT ticket_id, title, status, priority, created_by, created_at,
                    (SELECT COUNT(*) FROM ticket_messages WHERE ticket_id = tickets.ticket_id) as message_count
             FROM tickets
-            WHERE status = %s
+            WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
-        """, (status,))
+        """, params)
         
         tickets = []
         for row in cur.fetchall():
@@ -525,10 +534,25 @@ st.divider()
 # Kanban board (drag & drop)
 st.subheader("Ticket Board")
 
+# Filters
+fcol1, fcol2 = st.columns([1, 3])
+with fcol1:
+    filter_priority = st.selectbox(
+        "Filter by Priority",
+        options=["All"] + VALID_PRIORITIES,
+        index=0,
+        key="filter_priority",
+    )
+with fcol2:
+    filter_search = st.text_input("Search by Title", key="filter_search")
+
+priority_filter = None if filter_priority == "All" else filter_priority
+search_filter = filter_search.strip() or None
+
 # Fetch tickets for each status
-open_tickets = get_tickets_by_status('open')
-in_progress_tickets = get_tickets_by_status('in_progress')
-resolved_tickets = get_tickets_by_status('resolved')
+open_tickets = get_tickets_by_status('open', priority=priority_filter, search=search_filter)
+in_progress_tickets = get_tickets_by_status('in_progress', priority=priority_filter, search=search_filter)
+resolved_tickets = get_tickets_by_status('resolved', priority=priority_filter, search=search_filter)
 
 COLUMN_STATUS = {
     "col_open": "open",
