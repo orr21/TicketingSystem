@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS ticket_messages (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+INSERT INTO app_meta (key, value)
+VALUES ('seed_version', '1')
+ON CONFLICT (key) DO NOTHING;
+
 WITH new_tickets AS (
     INSERT INTO tickets (title, status, priority, created_by)
     VALUES

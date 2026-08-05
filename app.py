@@ -77,33 +77,46 @@ def ensure_schema(conn):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cur.execute("SELECT COUNT(*) FROM tickets")
-        if cur.fetchone()[0] == 0:
-            sample_tickets = [
-                ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
-                ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
-                ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com'),
-            ]
-            ticket_ids = []
-            for title, status, priority, created_by in sample_tickets:
-                cur.execute(
-                    "INSERT INTO tickets (title, status, priority, created_by) VALUES (%s, %s, %s, %s) RETURNING ticket_id",
-                    (title, status, priority, created_by),
-                )
-                ticket_ids.append(cur.fetchone()[0])
-            sample_messages = [
-                (ticket_ids[0], 'Getting a timeout when connecting to VPN.', 'alice@example.com'),
-                (ticket_ids[0], 'We are investigating, please share your client logs.', 'support@example.com'),
-                (ticket_ids[1], 'Invoice shows an extra charge for last month.', 'bob@example.com'),
-                (ticket_ids[1], 'Confirmed the overcharge, a refund is being processed.', 'support@example.com'),
-                (ticket_ids[2], 'Deploy fails with a missing module error.', 'carol@example.com'),
-                (ticket_ids[2], 'Fixed by pinning the dependency version.', 'support@example.com'),
-            ]
-            for ticket_id, message_text, author in sample_messages:
-                cur.execute(
-                    "INSERT INTO ticket_messages (ticket_id, message_text, author) VALUES (%s, %s, %s)",
-                    (ticket_id, message_text, author),
-                )
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        cur.execute("SELECT value FROM app_meta WHERE key = 'seed_version'")
+        already_seeded = cur.fetchone() is not None
+        if not already_seeded:
+            cur.execute("SELECT COUNT(*) FROM tickets")
+            if cur.fetchone()[0] == 0:
+                sample_tickets = [
+                    ('Cannot log in to VPN', 'open', 'high', 'alice@example.com'),
+                    ('Billing discrepancy on invoice #2041', 'in_progress', 'medium', 'bob@example.com'),
+                    ('Databricks app deploy failing', 'resolved', 'low', 'carol@example.com'),
+                ]
+                ticket_ids = []
+                for title, status, priority, created_by in sample_tickets:
+                    cur.execute(
+                        "INSERT INTO tickets (title, status, priority, created_by) VALUES (%s, %s, %s, %s) RETURNING ticket_id",
+                        (title, status, priority, created_by),
+                    )
+                    ticket_ids.append(cur.fetchone()[0])
+                sample_messages = [
+                    (ticket_ids[0], 'Getting a timeout when connecting to VPN.', 'alice@example.com'),
+                    (ticket_ids[0], 'We are investigating, please share your client logs.', 'support@example.com'),
+                    (ticket_ids[1], 'Invoice shows an extra charge for last month.', 'bob@example.com'),
+                    (ticket_ids[1], 'Confirmed the overcharge, a refund is being processed.', 'support@example.com'),
+                    (ticket_ids[2], 'Deploy fails with a missing module error.', 'carol@example.com'),
+                    (ticket_ids[2], 'Fixed by pinning the dependency version.', 'support@example.com'),
+                ]
+                for ticket_id, message_text, author in sample_messages:
+                    cur.execute(
+                        "INSERT INTO ticket_messages (ticket_id, message_text, author) VALUES (%s, %s, %s)",
+                        (ticket_id, message_text, author),
+                    )
+            cur.execute(
+                "INSERT INTO app_meta (key, value) VALUES ('seed_version', '1') "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+            )
             conn.commit()
 
 def get_db_connection():
