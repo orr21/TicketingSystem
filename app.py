@@ -332,6 +332,23 @@ def update_ticket_priority(ticket_id, new_priority):
 VALID_STATUSES = ['open', 'in_progress', 'resolved']
 VALID_PRIORITIES = ['low', 'medium', 'high', 'urgent']
 
+def delete_ticket(ticket_id):
+    """Delete a ticket (messages cascade via FK)"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tickets WHERE ticket_id = %s", (ticket_id,))
+            conn.commit()
+            return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Failed to delete ticket: {e}")
+        return False
+
+
 PRIORITY_COLORS = {
     'urgent': (244, 67, 54),
     'high': (255, 152, 0),
@@ -455,6 +472,26 @@ def show_ticket_modal():
             if st.button("Close", key=f"close_{ticket_id}"):
                 st.session_state.selected_ticket = None
                 st.rerun()
+        
+        st.divider()
+        
+        st.subheader("Danger Zone")
+        if st.button("Delete Ticket", key=f"delete_{ticket_id}", type="secondary"):
+            st.session_state[f"confirming_delete_{ticket_id}"] = True
+        if st.session_state.get(f"confirming_delete_{ticket_id}"):
+            st.warning("Are you sure? This permanently deletes the ticket and all its messages.")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Yes, Delete", key=f"confirm_delete_{ticket_id}", type="primary"):
+                    if delete_ticket(ticket_id):
+                        st.session_state[f"confirming_delete_{ticket_id}"] = False
+                        st.session_state.selected_ticket = None
+                        st.success("Ticket deleted!")
+                        st.rerun()
+            with c2:
+                if st.button("Cancel", key=f"cancel_delete_{ticket_id}"):
+                    st.session_state[f"confirming_delete_{ticket_id}"] = False
+                    st.rerun()
     
     ticket_dialog()
 
